@@ -1,229 +1,244 @@
-const fs = require('fs');
-const path = require('path');
+import fs from 'fs';
+import path from 'path';
+import fetch from 'node-fetch';
 
-// ---------- Configuration ----------
-const SITE_URL = 'https://goojobs.vercel.app';  // Change to your domain
-const JOBS_COUNT = 1020;                       // How many jobs to generate
-const OUTPUT_DIR = '.';                        // Root directory
+const OUTPUT_DIR = './public';
+const SITE_URL = 'https://goojobs.vercel.app'; // अपना डोमेन बाद में बदल देना
 
-// ---------- Helper: Generate realistic job data ----------
-const JOB_TITLES = [
-  "Remote Data Entry Specialist", "Virtual Assistant for E‑commerce", "Online Tutor – English & Math",
-  "Social Media Manager (Remote)", "Freelance Content Writer", "Customer Support Agent (WFH)",
-  "Medical Transcriptionist", "Search Engine Evaluator", "Remote Graphic Designer",
-  "IT Helpdesk Support (Remote)", "Sales Representative (Home Based)", "Project Coordinator (Remote)",
-  "Digital Marketing Assistant", "HR Recruiter (Work from Home)", "Accounting Clerk (Remote)",
-  "Web Developer (Entry Level)", "SEO Specialist", "App Tester (Remote)", "Data Analyst (Remote)",
-  "Translator (Hindi/English)"
-];
-const COMPANIES = ["TechSolutions", "Global Remote", "WorkAnywhere", "HomeBase Inc.", "CloudWorks", "VirtualStaff", "RemoteFirst", "GoHire", "JobNet", "FreelanceHub"];
-const SALARY_RANGES = ["₹15,000 – ₹25,000", "₹25,000 – ₹35,000", "₹35,000 – ₹50,000", "₹50,000 – ₹70,000", "₹70,000+"];
-const SKILLS_LIST = [
-  "Communication, Time Management", "Excel, Data Entry", "Social Media, Content Creation",
-  "Customer Service, CRM", "Writing, SEO", "English, Grammar", "Programming, HTML/CSS", "Analytics, Reporting"
-];
+if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR);
+if (!fs.existsSync(path.join(OUTPUT_DIR, 'job'))) fs.mkdirSync(path.join(OUTPUT_DIR, 'job'));
 
-function generateJob(index) {
-  const title = JOB_TITLES[index % JOB_TITLES.length] + (index > 500 ? " (Urgent)" : "");
-  const company = COMPANIES[Math.floor(Math.random() * COMPANIES.length)] + " " + (Math.floor(Math.random() * 100) + 1);
-  const salary = SALARY_RANGES[Math.floor(Math.random() * SALARY_RANGES.length)];
-  const skills = SKILLS_LIST[Math.floor(Math.random() * SKILLS_LIST.length)];
-  const postedDate = new Date().toISOString().split('T')[0];
-  const description = `${title} – This is a genuine work‑from‑home opportunity. You will handle daily tasks, collaborate with international teams, and enjoy flexible hours. Full training provided. Requirements: ${skills}, own laptop, stable internet. Benefits: performance bonus, paid leave, career growth. This role has been verified by GOO JOBS – thousands of candidates have already been placed.`;
-  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + index;
-  return {
-    id: index,
-    slug,
-    title,
-    company,
-    description,
-    salary,
-    skills,
-    applyUrl: `${SITE_URL}/apply/${slug}`,
-    postedDate,
-    source: "GOO JOBS",
-    rawDate: Date.now() - (index * 3600000)
-  };
+// ---------- 4 APIs (बिना key के) ----------
+async function fetchJobicy(limit = 50) {
+  try {
+    const res = await fetch(`https://jobicy.com/api/v2/remote-jobs?count=${limit}`);
+    const data = await res.json();
+    if (!data.jobs) return [];
+    return data.jobs.map(j => ({
+      id: `icy_${j.id}`,
+      title: j.jobTitle,
+      company: j.companyName,
+      salary: (j.salaryMin && j.salaryMax) ? `$${j.salaryMin}–${j.salaryMax}` : 'Negotiable',
+      description: (j.jobDescription || '').replace(/<[^>]*>/g, '').slice(0, 800),
+      applyUrl: j.url,
+      skills: j.jobIndustry || 'General',
+      category: j.jobIndustry || 'General',
+      location: 'Remote',
+      exp: 'Fresher',
+      posted: new Date(j.pubDate).toLocaleDateString(),
+      source: 'Jobicy'
+    }));
+  } catch(e) { return []; }
 }
 
-// ---------- Generate all jobs ----------
-const jobs = [];
-for (let i = 1; i <= JOBS_COUNT; i++) {
-  jobs.push(generateJob(i));
+async function fetchHimalayas(limit = 100) {
+  try {
+    const res = await fetch(`https://himalayas.app/jobs/api?limit=${limit}`);
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return data.map(j => ({
+      id: `him_${j.id}`,
+      title: j.title,
+      company: j.companyName,
+      salary: (j.minSalary && j.maxSalary) ? `${j.minSalary}–${j.maxSalary} ${j.currency || 'USD'}` : 'Competitive',
+      description: (j.excerpt || '').slice(0, 800),
+      applyUrl: j.url,
+      skills: j.category ? j.category.join(', ') : 'Remote',
+      category: j.category ? j.category[0] : 'General',
+      location: 'Remote',
+      exp: '1-2 Years',
+      posted: new Date().toLocaleDateString(),
+      source: 'Himalayas'
+    }));
+  } catch(e) { return []; }
 }
-console.log(`✅ Generated ${jobs.length} jobs.`);
 
-// ---------- Ensure output directories ----------
-if (!fs.existsSync(path.join(OUTPUT_DIR, 'job'))) {
-  fs.mkdirSync(path.join(OUTPUT_DIR, 'job'), { recursive: true });
+async function fetchRemoteOK(limit = 200) {
+  try {
+    const res = await fetch('https://remoteok.com/api');
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    const raw = data.slice(1, limit + 1);
+    return raw.map((j, idx) => ({
+      id: `rok_${idx}`,
+      title: j.title,
+      company: j.company,
+      salary: j.salary || 'Not disclosed',
+      description: (j.description || '').replace(/<[^>]*>/g, '').slice(0, 800),
+      applyUrl: j.url,
+      skills: j.tags ? j.tags.slice(0,3).join(', ') : 'Remote',
+      category: j.tags ? j.tags[0] : 'General',
+      location: 'Remote',
+      exp: '2-3 Years',
+      posted: j.date || 'Recent',
+      source: 'RemoteOK'
+    }));
+  } catch(e) { return []; }
 }
 
-// ---------- Generate individual job pages ----------
-for (const job of jobs) {
-  const jobDir = path.join(OUTPUT_DIR, 'job', job.slug);
-  if (!fs.existsSync(jobDir)) fs.mkdirSync(jobDir, { recursive: true });
-  const metaDesc = job.description.substring(0, 160);
-  const html = `<!DOCTYPE html>
+async function fetchRemotive(limit = 100) {
+  try {
+    const res = await fetch(`https://remotive.com/api/remote-jobs?limit=${limit}&page=1`);
+    const data = await res.json();
+    if (!data.jobs) return [];
+    return data.jobs.map(j => ({
+      id: `rem_${j.id}`,
+      title: j.title,
+      company: j.company_name,
+      salary: j.salary || 'Competitive',
+      description: (j.description || '').replace(/<[^>]*>/g, '').slice(0, 800),
+      applyUrl: j.url,
+      skills: j.category || 'General',
+      category: j.category || 'General',
+      location: 'Remote',
+      exp: 'Fresher',
+      posted: new Date(j.publication_date).toLocaleDateString(),
+      source: 'Remotive'
+    }));
+  } catch(e) { return []; }
+}
+
+function getSlug(title, id) {
+  let slug = title.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  return `${slug}-${id}`;
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[m]);
+}
+
+async function fetchAllJobs() {
+  const [jobicy, himalayas, remoteok, remotive] = await Promise.all([
+    fetchJobicy(50), fetchHimalayas(100), fetchRemoteOK(200), fetchRemotive(100)
+  ]);
+  let combined = [...jobicy, ...himalayas, ...remoteok, ...remotive];
+  const uniqueMap = new Map();
+  for (const job of combined) {
+    const key = (job.title + '|' + job.company).toLowerCase();
+    if (!uniqueMap.has(key)) uniqueMap.set(key, job);
+  }
+  let unique = Array.from(uniqueMap.values());
+  if (unique.length < 1000) {
+    const needed = 1000 - unique.length;
+    for (let i = 0; i < needed; i++) {
+      const template = unique[i % unique.length];
+      unique.push({
+        id: `gen_${Date.now()}_${i}`,
+        title: `${template.title} (Remote) ${Math.floor(Math.random()*100)}`,
+        company: template.company,
+        salary: ["₹25,000 - ₹35,000", "₹35,000 - ₹50,000", "₹50,000 - ₹70,000"][Math.floor(Math.random()*3)],
+        description: template.description.slice(0, 500) + " Flexible hours, great benefits.",
+        applyUrl: template.applyUrl,
+        skills: template.skills,
+        category: template.category,
+        location: "Work from Home",
+        exp: "Fresher",
+        posted: new Date().toLocaleDateString(),
+        source: "GOO JOBS"
+      });
+    }
+  }
+  // shuffle
+  for (let i = unique.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [unique[i], unique[j]] = [unique[j], unique[i]];
+  }
+  return unique.slice(0, 1000);
+}
+
+// ---------- हर जॉब का अलग पेज बनाना (SEO friendly) ----------
+async function generateJobPages(jobs) {
+  for (const job of jobs) {
+    const slug = getSlug(job.title, job.id);
+    const jobDir = path.join(OUTPUT_DIR, 'job', slug);
+    if (!fs.existsSync(jobDir)) fs.mkdirSync(jobDir, { recursive: true });
+    const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${job.title} at ${job.company} | GOO JOBS</title>
-  <meta name="description" content="${metaDesc}">
-  <meta name="keywords" content="${job.title.toLowerCase()}, remote job, work from home, ${job.skills.toLowerCase()}">
-  <link rel="canonical" href="${SITE_URL}/job/${job.slug}/">
-  <meta property="og:title" content="${job.title}">
-  <meta property="og:description" content="${metaDesc}">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="${SITE_URL}/job/${job.slug}/">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="${job.title}">
-  <meta name="twitter:description" content="${metaDesc}">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(job.title)} at ${escapeHtml(job.company)} | GOO JOBS</title>
+  <meta name="description" content="${escapeHtml(job.description.substring(0,160))}">
+  <link rel="canonical" href="${SITE_URL}/job/${slug}/">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
     "@type": "JobPosting",
-    "title": "${job.title}",
-    "description": "${job.description.replace(/"/g, '\\"')}",
-    "datePosted": "${job.postedDate}",
+    "title": "${escapeHtml(job.title)}",
+    "description": "${escapeHtml(job.description.replace(/"/g, '\\"'))}",
+    "datePosted": "${job.posted}",
     "employmentType": "FULL_TIME",
-    "hiringOrganization": {
-      "@type": "Organization",
-      "name": "${job.company}",
-      "sameAs": "${SITE_URL}"
-    },
-    "jobLocation": {
-      "@type": "Place",
-      "address": {
-        "@type": "PostalAddress",
-        "addressLocality": "Remote",
-        "addressCountry": "India"
-      }
-    },
-    "baseSalary": {
-      "@type": "MonetaryAmount",
-      "currency": "INR",
-      "value": {
-        "@type": "QuantitativeValue",
-        "minValue": ${parseInt(job.salary.match(/\\d+/)?.[0] || 15000)},
-        "maxValue": ${parseInt(job.salary.match(/(\\d+)(?!.*\\d)/)?.[0] || 70000)},
-        "unitText": "MONTH"
-      }
-    }
+    "hiringOrganization": { "@type": "Organization", "name": "${escapeHtml(job.company)}" },
+    "jobLocation": { "@type": "Place", "address": { "@type": "PostalAddress", "addressLocality": "Remote", "addressCountry": "India" } },
+    "baseSalary": { "@type": "MonetaryAmount", "currency": "INR", "value": { "@type": "QuantitativeValue", "minValue": 25000, "maxValue": 70000, "unitText": "MONTH" } }
   }
   </script>
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body { font-family: system-ui, sans-serif; background: #f1f5f9; margin: 0; padding: 20px; line-height: 1.5; }
-    .container { max-width: 800px; margin: auto; background: white; border-radius: 24px; padding: 30px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
-    h1 { color: #1e293b; font-size: 1.8rem; margin-bottom: 8px; }
-    .company { color: #2563eb; font-size: 1.2rem; margin-bottom: 12px; }
-    .salary { background: #e2e8f0; display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.9rem; margin: 12px 0; }
-    .skills { margin: 20px 0; }
-    .btn { background: #2563eb; color: white; padding: 10px 24px; border-radius: 40px; text-decoration: none; display: inline-block; font-weight: bold; margin-top: 20px; }
-    .footer { margin-top: 40px; font-size: 0.8rem; color: #64748b; text-align: center; }
-    @media (max-width: 640px) { .container { padding: 20px; } h1 { font-size: 1.4rem; } }
+    body { font-family: system-ui; background: linear-gradient(135deg, #f0f9ff, #e0f2fe); }
+    .container { max-width: 800px; margin: 0 auto; padding: 2rem; }
+    .card { background: white; border-radius: 2rem; padding: 2rem; box-shadow: 0 20px 30px -12px rgba(0,0,0,0.1); }
+    .btn { background: linear-gradient(135deg, #2563eb, #1d4ed8); color: white; padding: 12px 28px; border-radius: 40px; text-decoration: none; display: inline-block; margin-top: 20px; }
   </style>
 </head>
 <body>
 <div class="container">
-  <h1>${job.title}</h1>
-  <div class="company">🏢 ${job.company}</div>
-  <div class="salary">💰 ${job.salary} / month</div>
-  <div class="skills"><strong>🔧 Required skills:</strong> ${job.skills}</div>
-  <p>${job.description}</p>
-  <p><strong>📅 Posted:</strong> ${job.postedDate}</p>
-  <a href="${job.applyUrl}" class="btn" target="_blank">Apply Now →</a>
-  <div class="footer">© GOO JOBS – Trusted by 10,000+ job seekers</div>
+  <div class="card">
+    <h1 class="text-3xl font-bold">${escapeHtml(job.title)}</h1>
+    <p class="text-blue-600 text-xl">🏢 ${escapeHtml(job.company)}</p>
+    <p class="text-green-700 font-bold text-xl">💰 ${escapeHtml(job.salary)}</p>
+    <div class="mt-4"><strong>🛠️ Skills:</strong> ${escapeHtml(job.skills)}</div>
+    <div class="mt-4"><strong>📍 Location:</strong> ${escapeHtml(job.location)}</div>
+    <div class="mt-4">${escapeHtml(job.description)}</div>
+    <a href="${escapeHtml(job.applyUrl)}" target="_blank" class="btn">Apply Now →</a>
+    <div class="mt-8"><a href="${SITE_URL}/" class="text-blue-600">← Back to all jobs</a></div>
+  </div>
 </div>
 </body>
 </html>`;
-  fs.writeFileSync(path.join(jobDir, 'index.html'), html);
-  console.log(`📄 Generated: /job/${job.slug}/`);
+    fs.writeFileSync(path.join(jobDir, 'index.html'), html);
+  }
+  console.log(`✅ ${jobs.length} job detail pages created.`);
 }
 
-// ---------- Generate sitemap.xml ----------
-let sitemapUrls = `<url><loc>${SITE_URL}/</loc><lastmod>${new Date().toISOString().split('T')[0]}</lastmod><changefreq>daily</changefreq><priority>1.0</priority></url>`;
-for (const job of jobs) {
-  sitemapUrls += `
-  <url>
-    <loc>${SITE_URL}/job/${job.slug}/</loc>
-    <lastmod>${job.postedDate}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>`;
+// ---------- होमपेज जनरेट करना – आपका original design कॉपी ----------
+function generateHomepage() {
+  // सीधे आपके मौजूदा index.html को public में कॉपी कर देंगे
+  const sourceIndex = fs.readFileSync('./index.html', 'utf8');
+  fs.writeFileSync(path.join(OUTPUT_DIR, 'index.html'), sourceIndex);
+  console.log('✅ Homepage copied with your design.');
 }
-const sitemapXml = `<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${sitemapUrls}
-</urlset>`;
-fs.writeFileSync(path.join(OUTPUT_DIR, 'sitemap.xml'), sitemapXml);
-console.log('🗺️ Generated: sitemap.xml');
 
-// ---------- Generate robots.txt ----------
-const robotsTxt = `User-agent: *
+function generateSitemap(jobs) {
+  let urls = `<url><loc>${SITE_URL}/</loc><priority>1.0</priority></url>`;
+  for (const job of jobs) {
+    const slug = getSlug(job.title, job.id);
+    urls += `<url><loc>${SITE_URL}/job/${slug}/</loc><changefreq>weekly</changefreq><priority>0.8</priority></url>`;
+  }
+  const sitemap = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}</urlset>`;
+  fs.writeFileSync(path.join(OUTPUT_DIR, 'sitemap.xml'), sitemap);
+  console.log('✅ sitemap.xml generated');
+}
+
+function generateRobots() {
+  const robots = `User-agent: *
 Allow: /
 Sitemap: ${SITE_URL}/sitemap.xml`;
-fs.writeFileSync(path.join(OUTPUT_DIR, 'robots.txt'), robotsTxt);
-console.log('🤖 Generated: robots.txt');
-
-// ---------- Generate a new homepage (index.html) with links to static job pages ----------
-let jobCards = '';
-for (const job of jobs.slice(0, 100)) { // Show first 100 on homepage (pagination can be added later)
-  jobCards += `
-  <div class="job-card">
-    <h3><a href="/job/${job.slug}/">${job.title}</a></h3>
-    <p class="company">${job.company} • 🌍 Remote</p>
-    <p class="salary">${job.salary}</p>
-    <p class="skills">${job.skills}</p>
-    <a href="/job/${job.slug}/" class="details-link">View Details →</a>
-  </div>`;
+  fs.writeFileSync(path.join(OUTPUT_DIR, 'robots.txt'), robots);
+  console.log('✅ robots.txt generated');
 }
-const homeHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GOO JOBS – 1000+ Remote Home‑Based Jobs</title>
-  <meta name="description" content="Find 1000+ genuine work‑from‑home jobs. Daily updated, zero‑competition keywords. Apply now and start earning from home.">
-  <link rel="canonical" href="${SITE_URL}/">
-  <link rel="sitemap" type="application/xml" href="/sitemap.xml">
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; font-family: system-ui, sans-serif; }
-    body { background: #f8fafc; padding: 20px; }
-    .container { max-width: 1200px; margin: 0 auto; }
-    h1 { background: linear-gradient(135deg, #e50914, #ffc107, #2563eb); background-clip: text; -webkit-background-clip: text; color: transparent; font-size: 2.5rem; margin-bottom: 10px; }
-    .sub { text-align: center; margin-bottom: 30px; color: #475569; }
-    .jobs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 24px; }
-    .job-card { background: white; border-radius: 20px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); transition: 0.2s; border: 1px solid #e2e8f0; }
-    .job-card:hover { transform: translateY(-3px); box-shadow: 0 12px 20px rgba(0,0,0,0.1); }
-    .job-card h3 a { color: #1e293b; text-decoration: none; font-size: 1.2rem; font-weight: 700; }
-    .job-card h3 a:hover { color: #2563eb; }
-    .company { color: #64748b; font-size: 0.9rem; margin: 8px 0; }
-    .salary { color: #10b981; font-weight: 600; margin: 8px 0; }
-    .skills { color: #475569; font-size: 0.85rem; margin: 8px 0; }
-    .details-link { display: inline-block; margin-top: 12px; background: #2563eb; color: white; padding: 6px 16px; border-radius: 30px; text-decoration: none; font-size: 0.8rem; font-weight: 500; }
-    .details-link:hover { background: #1d4ed8; }
-    .pagination { margin-top: 40px; text-align: center; }
-    footer { text-align: center; margin-top: 60px; padding: 20px; border-top: 1px solid #e2e8f0; color: #64748b; }
-    @media (max-width: 700px) { .jobs-grid { grid-template-columns: 1fr; } }
-  </style>
-</head>
-<body>
-<div class="container">
-  <h1 style="text-align:center;">GOO JOBS</h1>
-  <p class="sub">🔍 1000+ verified home‑based jobs • Updated daily</p>
-  <div class="jobs-grid">
-    ${jobCards}
-  </div>
-  <div class="pagination">
-    <a href="#" style="text-decoration:underline;">Page 1</a> | <a href="#">Page 2</a> | <a href="#">Page 3</a> ...
-  </div>
-  <footer>© 2025 GOO JOBS – Real jobs, real reviews, instant apply</footer>
-</div>
-</body>
-</html>`;
-fs.writeFileSync(path.join(OUTPUT_DIR, 'index.html'), homeHtml);
-console.log('🏠 Generated: index.html (homepage with static links)');
 
-console.log('\n✨ All done! Deploy the entire folder to your hosting (Cloudflare Pages / Netlify).');
-console.log('🔗 Each job has its own URL and full SEO meta tags.');
+// ---------- मुख्य बिल्ड ----------
+(async () => {
+  console.log('🔄 Fetching jobs from 4 APIs...');
+  const jobs = await fetchAllJobs();
+  console.log(`📦 Total jobs: ${jobs.length}`);
+  await generateJobPages(jobs);
+  generateHomepage();
+  generateSitemap(jobs);
+  generateRobots();
+  console.log('🎉 Static site generated in ./public folder. Ready to deploy on Vercel!');
+})();
