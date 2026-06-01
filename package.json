@@ -1,9 +1,9 @@
 {
-  "name": "goojobs",
+  "name": "goojobs-static",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "node generate.js"
+    "build": "node build.js"
   },
   "dependencies": {
     "node-fetch": "^3.3.2"
