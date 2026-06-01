@@ -1,15 +1,14 @@
-```javascript
 import fs from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
 
 const OUTPUT_DIR = './public';
-const SITE_URL = 'https://goojobs.vercel.app'; // अपना डोमेन बाद में बदल देना
+const SITE_URL = 'https://goojobs.vercel.app'; 
 
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR);
 if (!fs.existsSync(path.join(OUTPUT_DIR, 'job'))) fs.mkdirSync(path.join(OUTPUT_DIR, 'job'));
 
-// ---------- 4 REAL APIs (बिना key के) ----------
+// ---------- 4 REAL APIs ----------
 async function fetchJobicy(limit = 50) {
   try {
     const res = await fetch(`https://jobicy.com/api/v2/remote-jobs?count=${limit}`);
@@ -36,8 +35,10 @@ async function fetchHimalayas(limit = 100) {
   try {
     const res = await fetch(`https://himalayas.app/jobs/api?limit=${limit}`);
     const data = await res.json();
-    if (!Array.isArray(data)) return [];
-    return data.map(j => ({
+    // FIX: Himalayas API returns an object with a jobs array
+    const jobsArray = data.jobs || data; 
+    if (!Array.isArray(jobsArray)) return [];
+    return jobsArray.map(j => ({
       id: `him_${j.id}`,
       title: j.title || 'Remote Job',
       company: j.companyName || 'Company',
@@ -128,6 +129,7 @@ async function fetchAllJobs() {
     const needed = 1000 - unique.length;
     for (let i = 0; i < needed; i++) {
       const template = unique[i % unique.length];
+      if(!template) continue;
       unique.push({
         id: `gen_${Date.now()}_${i}`,
         title: `${template.title} (Remote) ${Math.floor(Math.random()*100)}`,
@@ -151,7 +153,7 @@ async function fetchAllJobs() {
   return unique.slice(0, 1000);
 }
 
-// ---------- जॉब डिटेल पेज (SEO friendly) ----------
+// ---------- जॉब डिटेल पेज ----------
 async function generateJobPages(jobs) {
   for (const job of jobs) {
     const slug = getSlug(job.title, job.id);
@@ -206,11 +208,15 @@ async function generateJobPages(jobs) {
   console.log(`✅ ${jobs.length} job pages created.`);
 }
 
-// ---------- होमपेज: GitHub वाला डिज़ाइन कॉपी ----------
 function generateHomepage() {
-  const sourceIndex = fs.readFileSync('./index.html', 'utf8');
-  fs.writeFileSync(path.join(OUTPUT_DIR, 'index.html'), sourceIndex);
-  console.log('✅ Homepage copied with your GitHub design!');
+  if (fs.existsSync('./index.html')) {
+    const sourceIndex = fs.readFileSync('./index.html', 'utf8');
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'index.html'), sourceIndex);
+    console.log('✅ Homepage copied with your GitHub design!');
+  } else {
+    console.log('⚠️ Root index.html missing! Creating a temporary placeholder homepage.');
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'index.html'), '<h1>Welcome to GOO JOBS</h1>');
+  }
 }
 
 function generateSitemap(jobs) {
@@ -239,6 +245,5 @@ function generateRobots() {
   generateHomepage();
   generateSitemap(jobs);
   generateRobots();
-  console.log('🎉 Static site generated in ./public folder. Now deploy on Vercel!');
+  console.log('🎉 Static site generated in ./public folder.');
 })();
-```
