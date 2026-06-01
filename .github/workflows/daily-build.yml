@@ -1,23 +1,36 @@
 name: Daily Job Sync
+
 on:
   schedule:
-    - cron: '0 0 * * *'   # हर दिन रात 12 बजे UTC
-  workflow_dispatch:       # मैन्युअल रन भी कर सकते हो
+    - cron: '0 0 * * *'   # हर दिन रात 12 बजे UTC पर अपने आप चलेगा
+  workflow_dispatch:       # जब चाहें बटन दबाकर मैन्युअल रन करें
+
+# FIX: GitHub Bot को कोड पुश करने की अनुमति देना ज़रूरी है
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm' # इससे बार-बार इंस्टॉल होने में समय कम लगेगा
+
       - run: npm install
+      
       - run: npm run build
+
       - name: Commit and push changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # public फ़ोल्डर में जो भी बदलाव हुए हैं उन्हें स्टेज करें
           git add public/
-          git diff --quiet && git diff --staged --quiet || git commit -m "Auto-update jobs [skip ci]"
-          git push
+          
+          # अगर कोई नया बदलाव हुआ है तभी कमिट करें, वरना स्किप करें
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update jobs [skip ci]" && git push)
