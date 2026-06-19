@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <!-- Supabase Library Added -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <title>GOO JOBS – 1000+ Real Remote Jobs | 4 APIs Auto-Sync</title>
   <meta name="description" content="1000+ genuine remote jobs from Jobicy, Himalayas, RemoteOK, Remotive. Search by category, salary, location. Daily fresh listings.">
   <script src="https://cdn.tailwindcss.com"></script>
@@ -14,14 +16,13 @@
       background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 50%, #fef3c7 100%);
       min-height: 100vh;
     }
-    /* Glass morphism effect for cards */
     .glass-card { 
       background: rgba(255,255,255,0.95); 
       backdrop-filter: blur(4px);
       border: 1px solid rgba(255,255,255,0.3);
       transition: all 0.3s cubic-bezier(0.2, 0.9, 0.4, 1.1);
       box-shadow: 0 8px 20px rgba(0,0,0,0.05);
-      border-radius: 1.5rem;.
+      border-radius: 1.5rem;
     }
     .glass-card:hover { 
       transform: translateY(-6px) scale(1.01);
@@ -29,7 +30,6 @@
       border-color: #3b82f6;
       background: white;
     }
-    /* 3D Button effect */
     .btn-3d {
       background: linear-gradient(135deg, #2563eb, #1d4ed8);
       box-shadow: 0 4px 0 #0f2e6e;
@@ -87,10 +87,6 @@
       border-color: transparent;
       box-shadow: 0 4px 8px rgba(37,99,235,0.3);
     }
-    .page-num:hover:not(.active-page) { 
-      background: #f1f5f9;
-      transform: translateY(-2px);
-    }
     .pagination-btn { 
       background: white; 
       border: 1px solid #cbd5e1; 
@@ -100,10 +96,6 @@
       cursor: pointer; 
       transition: 0.2s;
       box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-    }
-    .pagination-btn:hover:not(:disabled) { 
-      background: #f8fafc;
-      transform: translateY(-2px);
     }
     .filter-sidebar { 
       background: rgba(255,255,255,0.9);
@@ -117,7 +109,6 @@
       border-radius: 2rem;
       box-shadow: 0 25px 40px rgba(0,0,0,0.2);
     }
-    /* Animated gradient border for header */
     .header-border {
       background: linear-gradient(90deg, #dc2626, #fbbf24, #3b82f6, #dc2626);
       background-size: 300% 100%;
@@ -198,7 +189,6 @@
   <div class="container mx-auto px-4 text-center text-sm">© 2025 GOO JOBS – Real remote jobs from Jobicy, Himalayas, RemoteOK, Remotive • Auto-sync every 10 minutes</div>
 </footer>
 
-<!-- Company Modal (for Companies link) -->
 <div id="companyModal" class="modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:1000;">
   <div class="bg-white rounded-2xl max-w-lg w-full p-6 max-h-[80vh] overflow-auto shadow-2xl">
     <div class="flex justify-between items-center border-b pb-2 mb-4"><h3 class="font-bold text-xl">🏢 Companies Hiring Now</h3><button id="closeCompanyModal" class="text-2xl">&times;</button></div>
@@ -206,7 +196,6 @@
   </div>
 </div>
 
-<!-- Job Alert Modal -->
 <div id="alertModal" class="modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:1000;">
   <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
     <div class="flex justify-between items-center border-b pb-2 mb-4"><h3 class="font-bold text-xl">🔔 Get Job Alerts</h3><button id="closeAlertModal" class="text-2xl">&times;</button></div>
@@ -224,7 +213,10 @@
 </div>
 
 <script>
-  // ---------- 4 REAL APIs (same as before, no changes) ----------
+  // SUPABASE CONFIG
+  const supabase = supabase.createClient('https://hofsjokjvcnmsrddqpdm.supabase.co', 'sb_publishable_XserVyDENJpGysyz_VW-QA_LOilrstm');
+
+  // API FETCH LOGIC (Original)
   async function fetchJobicy(limit = 50) {
     try {
       const res = await fetch(`https://jobicy.com/api/v2/remote-jobs?count=${limit}`);
@@ -365,7 +357,7 @@
   async function loadOrSync(showMsg=true) {
     const btn = document.getElementById('syncBtn');
     if(btn) btn.disabled=true;
-    if(showMsg) showNotif("🔄 Fetching 1000+ real jobs from 4 APIs...");
+    if(showMsg) showNotif("🔄 Fetching 1000+ real jobs...");
     try {
       const jobs = await fetchAllRealJobs();
       allJobs = jobs; saveJobs(); filteredJobs = [...allJobs]; currentPage=1; renderJobs();
@@ -418,10 +410,29 @@
     document.querySelectorAll('.tag-filter').forEach(tag=>{ tag.onclick=()=>{ document.getElementById('searchKeyword').value=tag.dataset.tag; applyFilters(); }; });
   }
 
+  // --- MODAL FIXED WITH SUPABASE ---
   function openModal(job) {
     const modalBody=document.getElementById('modalBody');
-    modalBody.innerHTML=`<h4 class="text-2xl font-bold text-gray-800">${escapeHtml(job.title)}</h4><p class="text-blue-600 font-semibold mt-1">${escapeHtml(job.company)}</p><div class="mt-4 space-y-2 text-sm text-gray-700"><p><strong>Category:</strong> ${escapeHtml(job.category||'-')}</p><p><strong>Location:</strong> ${escapeHtml(job.location||'-')}</p><p><strong>Experience:</strong> ${escapeHtml(job.exp||'-')}</p><p><strong>Salary:</strong> ${escapeHtml(job.salary||'-')}</p><p><strong>Skills:</strong> ${escapeHtml(job.skills||'-')}</p></div><div class="mt-4 text-gray-600 leading-7">${escapeHtml(job.description||'')}</div><div class="mt-6 flex gap-3"><a href="${escapeHtml(job.applyUrl)}" target="_blank" class="btn-3d text-white px-5 py-2 rounded-full inline-block">Apply Now</a></div>`;
+    modalBody.innerHTML=`
+      <h4 class="text-2xl font-bold text-gray-800">${escapeHtml(job.title)}</h4>
+      <p class="text-blue-600 font-semibold mt-1">${escapeHtml(job.company)}</p>
+      <div class="mt-4 p-4 bg-gray-50 rounded-xl border border-gray-100">
+        <p class="text-sm font-semibold mb-2">Apply for this job:</p>
+        <input type="text" id="app_name" placeholder="Your Full Name" class="w-full border rounded-xl p-2 mb-2">
+        <input type="text" id="app_phone" placeholder="Phone Number" class="w-full border rounded-xl p-2 mb-3">
+        <button id="applyBtn" class="btn-3d text-white w-full py-2 rounded-xl font-bold">Submit Application</button>
+      </div>
+      <div class="mt-4 text-gray-600 leading-7 text-sm">${escapeHtml(job.description||'')}</div>
+    `;
     document.getElementById('jobModal').style.display='flex';
+    document.getElementById('applyBtn').onclick = async () => {
+      const name = document.getElementById('app_name').value;
+      const phone = document.getElementById('app_phone').value;
+      if(!name || !phone) { alert("Please enter Name and Phone!"); return; }
+      const { error } = await supabase.from('applicants').insert([{ job_id: job.id, name: name, phone: phone }]);
+      if(error) alert("Error: " + error.message);
+      else { alert("✅ Application sent successfully!"); document.getElementById('jobModal').style.display='none'; }
+    };
   }
 
   function applyFilters() {
@@ -431,81 +442,31 @@
     const sal = document.getElementById('salaryFilter').value;
     const exp = document.getElementById('expFilter').value;
     const loc = document.getElementById('locFilter').value;
-
     if(kw) filtered = filtered.filter(j=> j.title.toLowerCase().includes(kw) || j.company.toLowerCase().includes(kw) || (j.skills||'').toLowerCase().includes(kw) || (j.description||'').toLowerCase().includes(kw));
     if(cat && cat !== "") filtered = filtered.filter(j=> (j.category||'').toLowerCase() === cat.toLowerCase());
     if(sal) filtered = filtered.filter(j=>{ const n=getSalaryNumber(j.salary); if(sal==='0-20000') return n<20000; if(sal==='20000-40000') return n>=20000 && n<40000; if(sal==='40000-60000') return n>=40000 && n<60000; if(sal==='60000+') return n>=60000; return true; });
     if(exp && exp !== "") filtered = filtered.filter(j=> (j.exp||'') === exp);
     if(loc && loc !== "") filtered = filtered.filter(j=> (j.location||'').toLowerCase().includes(loc.toLowerCase()));
-
     filteredJobs = filtered;
     currentPage = 1;
     renderJobs();
   }
 
-  // Nav Links functionality (active, no dummy)
-  document.getElementById('navHome').addEventListener('click', (e) => {
-    e.preventDefault();
-    document.getElementById('searchKeyword').value = '';
-    document.getElementById('jobCategory').value = '';
-    document.getElementById('salaryFilter').value = '';
-    document.getElementById('expFilter').value = '';
-    document.getElementById('locFilter').value = '';
-    applyFilters();
-    window.scrollTo({top:0,behavior:'smooth'});
-  });
-  document.getElementById('navBrowse').addEventListener('click', (e) => {
-    e.preventDefault();
-    document.getElementById('searchKeyword').value = '';
-    document.getElementById('jobCategory').value = '';
-    document.getElementById('salaryFilter').value = '';
-    document.getElementById('expFilter').value = '';
-    document.getElementById('locFilter').value = '';
-    applyFilters();
-    window.scrollTo({top:0,behavior:'smooth'});
-  });
-  document.getElementById('navCompanies').addEventListener('click', async (e) => {
-    e.preventDefault();
-    const companies = [...new Set(allJobs.map(job => job.company).filter(c => c))].slice(0, 100);
-    const listDiv = document.getElementById('companyList');
-    listDiv.innerHTML = companies.map(c => `<div class="border-b py-2 flex justify-between"><span>🏢 ${escapeHtml(c)}</span><span class="text-xs text-gray-500">${allJobs.filter(j=>j.company===c).length} jobs</span></div>`).join('');
-    document.getElementById('companyModal').style.display = 'flex';
-  });
-  document.getElementById('navAlerts').addEventListener('click', (e) => {
-    e.preventDefault();
-    document.getElementById('alertModal').style.display = 'flex';
-  });
+  document.getElementById('navHome').addEventListener('click', (e) => { e.preventDefault(); document.getElementById('searchKeyword').value = ''; document.getElementById('jobCategory').value = ''; document.getElementById('salaryFilter').value = ''; document.getElementById('expFilter').value = ''; document.getElementById('locFilter').value = ''; applyFilters(); window.scrollTo({top:0,behavior:'smooth'}); });
+  document.getElementById('navBrowse').addEventListener('click', (e) => { e.preventDefault(); document.getElementById('searchKeyword').value = ''; document.getElementById('jobCategory').value = ''; document.getElementById('salaryFilter').value = ''; document.getElementById('expFilter').value = ''; document.getElementById('locFilter').value = ''; applyFilters(); window.scrollTo({top:0,behavior:'smooth'}); });
+  document.getElementById('navCompanies').addEventListener('click', async (e) => { e.preventDefault(); const companies = [...new Set(allJobs.map(job => job.company).filter(c => c))].slice(0, 100); const listDiv = document.getElementById('companyList'); listDiv.innerHTML = companies.map(c => `<div class="border-b py-2 flex justify-between"><span>🏢 ${escapeHtml(c)}</span><span class="text-xs text-gray-500">${allJobs.filter(j=>j.company===c).length} jobs</span></div>`).join(''); document.getElementById('companyModal').style.display = 'flex'; });
+  document.getElementById('navAlerts').addEventListener('click', (e) => { e.preventDefault(); document.getElementById('alertModal').style.display = 'flex'; });
   document.getElementById('closeCompanyModal').onclick = () => document.getElementById('companyModal').style.display = 'none';
   document.getElementById('closeAlertModal').onclick = () => document.getElementById('alertModal').style.display = 'none';
-  document.getElementById('subscribeAlert').onclick = () => {
-    const email = document.getElementById('alertEmail').value;
-    if(email && email.includes('@')) { showNotif(`✅ Alerts sent to ${email} (demo)`); document.getElementById('alertModal').style.display = 'none'; }
-    else showNotif('Please enter valid email', true);
-  };
-  window.onclick = (e) => {
-    if(e.target === document.getElementById('companyModal')) document.getElementById('companyModal').style.display='none';
-    if(e.target === document.getElementById('alertModal')) document.getElementById('alertModal').style.display='none';
-    if(e.target === document.getElementById('jobModal')) document.getElementById('jobModal').style.display='none';
-  };
-
-  // event listeners
+  document.getElementById('subscribeAlert').onclick = () => { const email = document.getElementById('alertEmail').value; if(email && email.includes('@')) { showNotif(`✅ Alerts sent to ${email} (demo)`); document.getElementById('alertModal').style.display = 'none'; } else showNotif('Please enter valid email', true); };
+  window.onclick = (e) => { if(e.target === document.getElementById('companyModal')) document.getElementById('companyModal').style.display='none'; if(e.target === document.getElementById('alertModal')) document.getElementById('alertModal').style.display='none'; if(e.target === document.getElementById('jobModal')) document.getElementById('jobModal').style.display='none'; };
   document.getElementById('syncBtn').addEventListener('click', ()=>loadOrSync(true));
   document.getElementById('searchBtn').addEventListener('click', applyFilters);
-  document.getElementById('clearFilters').addEventListener('click', ()=>{
-    document.getElementById('searchKeyword').value=''; document.getElementById('jobCategory').value=''; document.getElementById('salaryFilter').value='';
-    document.getElementById('expFilter').value=''; document.getElementById('locFilter').value='';
-    filteredJobs = [...allJobs]; currentPage=1; renderJobs();
-  });
+  document.getElementById('clearFilters').addEventListener('click', ()=>{ document.getElementById('searchKeyword').value=''; document.getElementById('jobCategory').value=''; document.getElementById('salaryFilter').value=''; document.getElementById('expFilter').value=''; document.getElementById('locFilter').value=''; filteredJobs = [...allJobs]; currentPage=1; renderJobs(); });
   document.getElementById('closeModalBtn').onclick = ()=>document.getElementById('jobModal').style.display='none';
   document.getElementById('searchKeyword').addEventListener('keyup', (e)=>{ if(e.key==='Enter') applyFilters(); });
 
-  // initial load and auto-sync every 10 minutes
-  (async ()=>{
-    const cached = localStorage.getItem(STORAGE_KEY);
-    if(cached) { allJobs=JSON.parse(cached); filteredJobs=[...allJobs]; renderJobs(); loadOrSync(false); }
-    else await loadOrSync(true);
-    setInterval(()=>loadOrSync(false), 10 * 60 * 1000); // auto-sync every 10 minutes
-  })();
+  (async ()=>{ const cached = localStorage.getItem(STORAGE_KEY); if(cached) { allJobs=JSON.parse(cached); filteredJobs=[...allJobs]; renderJobs(); loadOrSync(false); } else await loadOrSync(true); setInterval(()=>loadOrSync(false), 10 * 60 * 1000); })();
 </script>
 </body>
 </html>
