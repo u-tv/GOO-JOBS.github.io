@@ -1,77 +1,73 @@
-name: Daily Real Jobs Sync
+name: Daily Auto Sync
 
 on:
-  workflow_dispatch:
-
   schedule:
-    # रोज 00:00 UTC = भारत में सुबह 05:30
-    - cron: "0 0 * * *"
+    # Every day at 10:00 AM IST.
+    # 10:00 IST = 04:30 UTC.
+    - cron: "30 4 * * *"
+
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: daily-real-jobs-main
+  group: daily-auto-sync
   cancel-in-progress: false
 
 jobs:
   sync:
+    name: Run Daily Sync
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: main
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          node-version: "24"
-          package-manager-cache: false
+          python-version: "3.12"
+          cache: "pip"
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Generate real jobs
+      - name: Run sync
         env:
-          SITE_URL: https://goojobs.vercel.app
-          TARGET_JOBS: "5000"
-          MAX_AGE_DAYS: "30"
-          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
-        run: npm run build
+          SOURCE_URL: ${{ secrets.SOURCE_URL }}
+          TARGET_URL: ${{ secrets.TARGET_URL }}
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          SYNC_TIMEOUT: "30"
+          SYNC_ATTEMPTS: "5"
+        run: |
+          python scripts/sync.py
 
-      - name: Commit generated site
+      - name: Save backup files
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add -A public/
+          git add sync-backups || true
 
           if git diff --cached --quiet; then
-            echo "No changes found"
-            exit 0
+            echo "No backup changes to commit"
+          else
+            git commit -m "chore: daily sync backup"
+            git push
           fi
 
-          git commit -m "chore: daily real jobs update [skip ci]"
-
-      - name: Push with retry
-        run: |
-          set -e
-
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
-              echo "Push successful"
-              exit 0
-            fi
-
-            if [ "$attempt" -eq 3 ]; then
-              echo "Push failed after 3 attempts"
-              exit 1
-            fi
-
-            git fetch origin main
-            git rebase origin/main
-          done
+      - name: Upload backup artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-backups-${{ github.run_number }}
+          path: sync-backups/
+          if-no-files-found: ignore
+          retention-days: 14
