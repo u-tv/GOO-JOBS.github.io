@@ -1,11 +1,14 @@
 {
-  "name": "goojobs",
+  "name": "job-portal-generator",
   "version": "1.0.0",
-  "type": "module",
+  "private": true,
+  "description": "Automated job portal generator with multi-source job aggregation",
+  "main": "generate.cjs",
   "scripts": {
-    "build": "node generate.js"
+    "build": "node generate.cjs",
+    "start": "node generate.cjs"
   },
-  "dependencies": {
-    "node-fetch": "^3.3.2"
+  "engines": {
+    "node": ">=18.18.0"
   }
 }
