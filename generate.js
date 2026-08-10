@@ -2,42 +2,41 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const ROOT = process.cwd();
-const PUBLIC = path.join(ROOT, "public");
-const JOBS_DIR = path.join(PUBLIC, "job");
-const DATA_FILE = path.join(PUBLIC, "jobs.json");
+const PUBLIC_DIR = path.join(ROOT, "public");
+const JOB_DIR = path.join(PUBLIC_DIR, "job");
+const DATA_FILE = path.join(PUBLIC_DIR, "jobs.json");
 
 const SITE_URL = (
   process.env.SITE_URL || "https://goojobs.vercel.app"
 ).replace(//+$/, "");
 
 const TARGET_JOBS = Number(process.env.TARGET_JOBS || 5000);
-const MAX_AGE_DAYS = Number(process.env.MAX_AGE_DAYS || 30);
-const TIMEOUT = 20000;
+const RETENTION_DAYS = Number(process.env.RETENTION_DAYS || 45);
+const API_LIMIT = Number(process.env.INDIAN_API_LIMIT || 5000);
 
-await fs.mkdir(PUBLIC, { recursive: true });
-await fs.mkdir(JOBS_DIR, { recursive: true });
+await fs.mkdir(PUBLIC_DIR, { recursive: true });
+await fs.mkdir(JOB_DIR, { recursive: true });
 
-function clean(value, fallback = "") {
+function text(value, fallback = "") {
   if (value === undefined || value === null) return fallback;
   return String(value).trim() || fallback;
 }
 
 function stripHtml(value) {
-  return clean(value)
+  return text(value)
     .replace(/<script[sS]*?</script>/gi, " ")
     .replace(/<style[sS]*?</style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
     .replace(/s+/g, " ")
     .trim();
 }
 
 function safeUrl(value) {
   try {
-    const url = new URL(clean(value));
+    const url = new URL(text(value));
     return ["http:", "https:"].includes(url.protocol) ? url.href : "";
   } catch {
     return "";
@@ -45,144 +44,58 @@ function safeUrl(value) {
 }
 
 function isoDate(value) {
-  const date = value ? new Date(value) : new Date();
-  return Number.isNaN(date.getTime())
+  const parsed = value ? new Date(value) : new Date();
+  return Number.isNaN(parsed.getTime())
     ? new Date().toISOString()
-    : date.toISOString();
-}
-
-function slugify(title, id) {
-  const slug = clean(title, "job")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-
-  return `${slug || "job"}-${String(id).replace(/[^a-zA-Z0-9_-]/g, "")}`;
+    : parsed.toISOString();
 }
 
 function html(value) {
-  return clean(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+  return text(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-function json(value) {
-  return JSON.stringify(value).replace(/</g, "\\u003c");
+function slugify(title, id) {
+  const slug = text(title, "job")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 90);
+
+  return `${slug || "job"}-${String(id).replace(
+    /[^a-zA-Z0-9_-]/g,
+    ""
+  )}`;
 }
 
-async function request(url, options = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT);
+async function fetchIndianJobs() {
+  const apiKey = process.env.INDIAN_API_KEY;
 
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        Accept: "application/json",
-        "User-Agent": "GOO-JOBS-Daily-Sync/1.0",
-        ...(options.headers || {})
-      }
-    });
+  if (!apiKey) {
+    throw new Error("INDIAN_API_KEY GitHub Secret में missing है");
+  }
 
-    if (!response.ok) {
-      throw new Error(`${response.status} ${response.statusText}`);
+  const url = new URL("https://jobs.indianapi.in/jobs");
+  url.searchParams.set("limit", String(API_LIMIT));
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "X-Api-Key": apiKey,
+      "User-Agent": "GOO-JOBS/1.0"
     }
+  });
 
-    return await response.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function normalize(job) {
-  const title = clean(job.title, "Remote Job");
-  const company = clean(job.company, "Company");
-  const applyUrl = safeUrl(job.applyUrl);
-
-  if (!job.id || !applyUrl) return null;
-
-  return {
-    id: clean(job.id),
-    title,
-    company,
-    salary: clean(job.salary, "Not disclosed"),
-    description: stripHtml(job.description).slice(0, 5000),
-    applyUrl,
-    source: clean(job.source, "Unknown"),
-    sourceUrl: safeUrl(job.sourceUrl) || applyUrl,
-    category: clean(job.category, "General"),
-    skills: clean(job.skills, "General"),
-    location: clean(job.location, "Remote"),
-    type: clean(job.type, "FULL_TIME"),
-    posted: isoDate(job.posted),
-    collectedAt: new Date().toISOString()
-  };
-}
-
-async function fetchMusePage(page) {
-  const apiKey = process.env.MUSE_API_KEY;
-  if (!apiKey) return [];
-
-  const url = new URL("https://www.themuse.com/api/public/jobs");
-  url.searchParams.set("page", String(page));
-  url.searchParams.set("api_key", apiKey);
-
-  const data = await request(url);
-  const results = Array.isArray(data.results) ? data.results : [];
-
-  return results
-    .map((job) =>
-      normalize({
-        id: `muse-${job.id}`,
-        title: job.name,
-        company: job.company?.name,
-        description: job.contents,
-        applyUrl: job.refs?.landing_page,
-        source: "The Muse",
-        sourceUrl: job.refs?.landing_page,
-        category: job.categories?.map((x) => x.name).join(", "),
-        skills: job.categories?.map((x) => x.name).join(", "),
-        location: job.locations?.map((x) => x.name).join(", "),
-        type: job.type,
-        posted: job.publication_date
-      })
-    )
-    .filter(Boolean);
-}
-
-async function fetchMuse() {
-  if (!process.env.MUSE_API_KEY) {
-    console.warn("MUSE_API_KEY missing; The Muse skipped");
-    return [];
+  if (!response.ok) {
+    throw new Error(`IndianAPI failed: ${response.status}`);
   }
 
-  const output = [];
+  const data = await response.json();
 
-  for (let page = 0; page < 250 && output.length < TARGET_JOBS; page++) {
-    try {
-      const jobs = await fetchMusePage(page);
-      if (!jobs.length) break;
-      output.push(...jobs);
-    } catch (error) {
-      console.warn(`The Muse page ${page} failed: ${error.message}`);
-      break;
-    }
-  }
-
-  return output;
-}
-
-async function fetchRemoteJobsPage(offset) {
-  const url = new URL("https://remotejobs.org/api/v1/jobs");
-  url.searchParams.set("limit", "50");
-  url.searchParams.set("offset", String(offset));
-
-  const data = await request(url);
   const rows = Array.isArray(data)
     ? data
     : Array.isArray(data.jobs)
@@ -192,108 +105,50 @@ async function fetchRemoteJobsPage(offset) {
         : [];
 
   return rows
-    .map((job) =>
-      normalize({
-        id: `remotejobs-${job.id || job.slug || job.url}`,
-        title: job.title || job.position,
-        company: job.company_name || job.company,
-        description: job.description || job.excerpt,
-        applyUrl: job.url || job.apply_url,
-        source: "RemoteJobs.org",
-        sourceUrl: job.url || job.apply_url,
-        category: job.category,
-        skills: Array.isArray(job.tags) ? job.tags.join(", ") : job.tags,
-        location: job.location || "Remote",
-        type: job.job_type || job.type,
-        posted: job.created_at || job.date
-      })
-    )
+    .map((job) => {
+      const applyUrl = safeUrl(
+        job.apply_link || job.apply_url || job.url || job.link
+      );
+
+      const id = text(
+        job.id || job.job_id || applyUrl
+      );
+
+      if (!id || !applyUrl) return null;
+
+      return {
+        id: `indianapi-${id}`,
+        title: text(job.title || job.job_title, "Indian Job"),
+        company: text(job.company || job.company_name, "Company"),
+        description: stripHtml(
+          job.job_description ||
+            job.description ||
+            job.role_and_responsibility ||
+            job.about_company
+        ).slice(0, 5000),
+        salary: text(
+          job.salary || job.salary_range,
+          "Not disclosed"
+        ),
+        location: text(job.location, "India"),
+        experience: text(job.experience, "Not specified"),
+        skills: text(
+          job.education_and_skills || job.skills,
+          "General"
+        ),
+        category: text(job.category || job.industry, "General"),
+        type: text(job.job_type, "Full Time"),
+        posted: isoDate(job.posted_date || job.created_at),
+        applyUrl,
+        source: "IndianAPI",
+        sourceUrl: applyUrl,
+        collectedAt: new Date().toISOString()
+      };
+    })
     .filter(Boolean);
 }
 
-async function fetchRemoteJobs() {
-  const output = [];
-
-  for (let offset = 0; offset < 25000 && output.length < TARGET_JOBS; offset += 50) {
-    try {
-      const jobs = await fetchRemoteJobsPage(offset);
-      if (!jobs.length) break;
-      output.push(...jobs);
-    } catch (error) {
-      console.warn(`RemoteJobs offset ${offset} failed: ${error.message}`);
-      break;
-    }
-  }
-
-  return output;
-}
-
-async function fetchJobicy() {
-  try {
-    const data = await request(
-      "https://jobicy.com/api/v2/remote-jobs?count=50"
-    );
-
-    return (data.jobs || [])
-      .map((job) =>
-        normalize({
-          id: `jobicy-${job.id}`,
-          title: job.jobTitle,
-          company: job.companyName,
-          salary:
-            job.salaryMin && job.salaryMax
-              ? `${job.salaryMin}-${job.salaryMax}`
-              : "Not disclosed",
-          description: job.jobDescription,
-          applyUrl: job.url,
-          source: "Jobicy",
-          sourceUrl: job.url,
-          category: job.jobIndustry,
-          skills: job.jobIndustry,
-          location: job.jobGeo || "Remote",
-          type: job.jobType,
-          posted: job.pubDate
-        })
-      )
-      .filter(Boolean);
-  } catch (error) {
-    console.warn(`Jobicy failed: ${error.message}`);
-    return [];
-  }
-}
-
-async function fetchRemotive() {
-  try {
-    const data = await request(
-      "https://remotive.com/api/remote-jobs?limit=100&page=1"
-    );
-
-    return (data.jobs || [])
-      .map((job) =>
-        normalize({
-          id: `remotive-${job.id}`,
-          title: job.title,
-          company: job.company_name,
-          salary: job.salary,
-          description: job.description,
-          applyUrl: job.url,
-          source: "Remotive",
-          sourceUrl: job.url,
-          category: job.category,
-          skills: job.tags,
-          location: job.candidate_required_location,
-          type: job.job_type,
-          posted: job.publication_date
-        })
-      )
-      .filter(Boolean);
-  } catch (error) {
-    console.warn(`Remotive failed: ${error.message}`);
-    return [];
-  }
-}
-
-async function readPrevious() {
+async function readPreviousJobs() {
   try {
     const data = JSON.parse(await fs.readFile(DATA_FILE, "utf8"));
     return Array.isArray(data.jobs) ? data.jobs : [];
@@ -302,13 +157,15 @@ async function readPrevious() {
   }
 }
 
-function removeDuplicates(jobs) {
+function deduplicate(jobs) {
   const map = new Map();
 
   for (const job of jobs) {
-    const key = `${job.title}|${job.company}|${job.applyUrl}`
+    const key = (
+      job.applyUrl ||
+      `${job.title}|${job.company}|${job.location}`
+    )
       .toLowerCase()
-      .replace(/s+/g, " ")
       .trim();
 
     if (!map.has(key)) map.set(key, job);
@@ -317,22 +174,23 @@ function removeDuplicates(jobs) {
   return [...map.values()];
 }
 
-function keepRecent(jobs) {
-  const cutoff = Date.now() - MAX_AGE_DAYS * 86400000;
+function removeExpired(jobs) {
+  const cutoff = Date.now() - RETENTION_DAYS * 86400000;
 
   return jobs.filter((job) => {
-    const time = new Date(job.posted).getTime();
-    return Number.isNaN(time) || time >= cutoff;
+    const timestamp = new Date(job.posted).getTime();
+
+    if (Number.isNaN(timestamp)) return true;
+    return timestamp >= cutoff;
   });
 }
 
-async function generatePage(job) {
+async function createJobPage(job) {
   const slug = slugify(job.title, job.id);
-  const directory = path.join(JOBS_DIR, slug);
+  const directory = path.join(JOB_DIR, slug);
+  const url = `${SITE_URL}/job/${slug}/`;
 
   await fs.mkdir(directory, { recursive: true });
-
-  const url = `${SITE_URL}/job/${slug}/`;
 
   const schema = {
     "@context": "https://schema.org",
@@ -340,17 +198,19 @@ async function generatePage(job) {
     title: job.title,
     description: job.description || `${job.title} at ${job.company}`,
     datePosted: job.posted.slice(0, 10),
-    employmentType: job.type.toUpperCase().replace(/[^A-Z_]/g, "_"),
     hiringOrganization: {
       "@type": "Organization",
       name: job.company
     },
-    jobLocationType: "TELECOMMUTE",
-    applicantLocationRequirements: {
-      "@type": "Country",
-      name: "Worldwide"
+    jobLocation: {
+      "@type": "Place",
+      address: {
+        "@type": "PostalAddress",
+        addressCountry: "IN"
+      }
     },
-    url
+    url,
+    sameAs: job.applyUrl
   };
 
   const page = `<!doctype html>
@@ -359,52 +219,71 @@ async function generatePage(job) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${html(job.title)} at ${html(job.company)} | GOO JOBS</title>
-<meta name="description" content="${html((job.description || "").slice(0, 160))}">
+<meta name="description" content="${html(
+    job.description.slice(0, 160)
+  )}">
 <link rel="canonical" href="${html(url)}">
-<script type="application/ld+json">${json(schema)}</script>
+<script type="application/ld+json">${JSON.stringify(schema).replace(
+    /</g,
+    "\\u003c"
+  )}</script>
 <style>
 body{margin:0;background:#eff6ff;font-family:system-ui;color:#0f172a}
 main{max-width:850px;margin:40px auto;padding:16px}
-article{background:#fff;padding:32px;border-radius:24px;box-shadow:0 15px 45px #0002}
+article{background:#fff;border-radius:24px;padding:32px;box-shadow:0 15px 45px #0002}
 h1{font-size:clamp(28px,5vw,48px)}
 .company{color:#2563eb;font-size:22px;font-weight:700}
 .meta{line-height:2;color:#475569}
 .description{line-height:1.8;white-space:pre-line}
-.apply{display:inline-block;background:#2563eb;color:#fff;padding:14px 24px;border-radius:999px;text-decoration:none;font-weight:700;margin:20px 0}
+.apply{display:inline-block;margin:20px 0;padding:14px 24px;border-radius:999px;background:#2563eb;color:white;text-decoration:none;font-weight:700}
 a{color:#2563eb}
 </style>
 </head>
 <body>
-<main><article>
+<main>
+<article>
 <h1>${html(job.title)}</h1>
 <p class="company">🏢 ${html(job.company)}</p>
 <div class="meta">
 <p>📍 ${html(job.location)}</p>
 <p>🛠 ${html(job.skills)}</p>
+<p>💼 ${html(job.experience)}</p>
 <p>💰 ${html(job.salary)}</p>
 <p>📅 ${html(job.posted.slice(0, 10))}</p>
 <p>🔎 ${html(job.source)}</p>
 </div>
 <p class="description">${html(job.description)}</p>
-<a class="apply" href="${html(job.applyUrl)}" target="_blank" rel="nofollow noopener noreferrer">Apply Now →</a>
+<a class="apply" href="${html(
+    job.applyUrl
+  )}" target="_blank" rel="nofollow noopener noreferrer">Apply Now →</a>
 <p><a href="${SITE_URL}/">← All jobs</a></p>
-</article></main>
+</article>
+</main>
 </body>
 </html>`;
 
-  await fs.writeFile(path.join(directory, "index.html"), page);
-  return { ...job, slug, url };
+  await fs.writeFile(
+    path.join(directory, "index.html"),
+    page,
+    "utf8"
+  );
+
+  return {
+    ...job,
+    slug,
+    url
+  };
 }
 
-async function generateFiles(jobs) {
+async function buildSite(jobs) {
   const pages = [];
 
   for (const job of jobs) {
-    pages.push(await generatePage(job));
+    pages.push(await createJobPage(job));
   }
 
   await fs.writeFile(
-    DATA_FILE,
+    path.join(PUBLIC_DIR, "jobs.json"),
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
@@ -413,79 +292,68 @@ async function generateFiles(jobs) {
       },
       null,
       2
-    )
+    ),
+    "utf8"
   );
 
+  const today = new Date().toISOString().slice(0, 10);
+
   const urls = [
-    `<url><loc>${SITE_URL}/</loc><lastmod>${new Date()
-      .toISOString()
-      .slice(0, 10)}</lastmod><priority>1</priority></url>`,
+    `<url><loc>${SITE_URL}/</loc><lastmod>${today}</lastmod><priority>1</priority></url>`,
     ...pages.map(
       (job) =>
-        `<url><loc>${job.url}</loc><lastmod>${new Date()
-          .toISOString()
-          .slice(0, 10)}</lastmod><priority>0.8</priority></url>`
+        `<url><loc>${job.url}</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>`
     )
   ].join("");
 
   await fs.writeFile(
-    path.join(PUBLIC, "sitemap.xml"),
-    `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}</urlset>`
+    path.join(PUBLIC_DIR, "sitemap.xml"),
+    `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}</urlset>`,
+    "utf8"
   );
 
   await fs.writeFile(
-    path.join(PUBLIC, "robots.txt"),
+    path.join(PUBLIC_DIR, "robots.txt"),
     `User-agent: *
 Allow: /
 Sitemap: ${SITE_URL}/sitemap.xml
-`
+`,
+    "utf8"
   );
 
   try {
-    await fs.copyFile(path.join(ROOT, "index.html"), path.join(PUBLIC, "index.html"));
+    await fs.copyFile(
+      path.join(ROOT, "index.html"),
+      path.join(PUBLIC_DIR, "index.html")
+    );
   } catch {
     await fs.writeFile(
-      path.join(PUBLIC, "index.html"),
-      "<!doctype html><html><body><h1>GOO JOBS</h1><script>fetch('/jobs.json').then(r=>r.json()).then(console.log)</script></body></html>"
+      path.join(PUBLIC_DIR, "index.html"),
+      "<h1>GOO JOBS</h1><p>Open jobs.json to view listings.</p>",
+      "utf8"
     );
   }
 
-  return pages;
+  console.log(`Published ${pages.length} real Indian jobs`);
 }
 
 async function main() {
-  console.log("Starting real-job sync...");
+  const fresh = await fetchIndianJobs();
+  const previous = await readPreviousJobs();
 
-  const [muse, remoteJobs, jobicy, remotive] = await Promise.all([
-    fetchMuse(),
-    fetchRemoteJobs(),
-    fetchJobicy(),
-    fetchRemotive()
-  ]);
+  const jobs = removeExpired(
+    deduplicate([...fresh, ...previous])
+  )
+    .sort((a, b) => new Date(b.posted) - new Date(a.posted))
+    .slice(0, TARGET_JOBS);
 
-  const fresh = removeDuplicates([
-    ...muse,
-    ...remoteJobs,
-    ...jobicy,
-    ...remotive
-  ]);
-
-  console.log(`Fresh real jobs received: ${fresh.length}`);
-
-  const previous = await readPrevious();
-  const merged = keepRecent(removeDuplicates([...fresh, ...previous])).slice(
-    0,
-    TARGET_JOBS
-  );
-
-  if (!merged.length) {
-    throw new Error("No real jobs available; previous data was not overwritten.");
+  if (!jobs.length) {
+    throw new Error(
+      "No real jobs found. Existing jobs.json was not overwritten."
+    );
   }
 
-  const pages = await generateFiles(merged);
-
-  console.log(`Published ${pages.length} real jobs`);
-  console.log(`Target capacity: ${TARGET_JOBS}`);
+  await buildSite(jobs);
 }
 
 main().catch((error) => {
