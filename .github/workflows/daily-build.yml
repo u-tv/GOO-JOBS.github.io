@@ -2,35 +2,158 @@ name: Daily Job Sync
 
 on:
   schedule:
-    - cron: '0 0 * * *'   # हर दिन रात 12 बजे UTC पर अपने आप चलेगा
-  workflow_dispatch:       # जब चाहें बटन दबाकर मैन्युअल रन करें
+    # रोज 00:00 UTC = भारत में सुबह 05:30 बजे
+    - cron: "0 0 * * *"
 
-# FIX: GitHub Bot को कोड पुश करने की अनुमति देना ज़रूरी है
+  workflow_dispatch:
+
 permissions:
   contents: write
 
+concurrency:
+  group: daily-job-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "20"
+  BUILD_OUTPUT_DIR: "public"
+
 jobs:
-  build:
+  build-sync-push:
+    name: Build, Verify and Push
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - name: Checkout latest repository
+        uses: actions/checkout@v4
         with:
-          node-version: 20
-          cache: 'npm' # इससे बार-बार इंस्टॉल होने में समय कम लगेगा
+          fetch-depth: 0
+          persist-credentials: true
+          ref: ${{ github.ref_name }}
 
-      - run: npm install
-      
-      - run: npm run build
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            npm-shrinkwrap.json
 
-      - name: Commit and push changes
+      - name: Validate project files
+        shell: bash
         run: |
+          set -Eeuo pipefail
+
+          test -f package.json || {
+            echo "::error::package.json नहीं मिला"
+            exit 1
+          }
+
+          node -e "const p=require('./package.json'); if (!p.scripts || !p.scripts.build) { console.error('::error::package.json में build script नहीं है'); process.exit(1) }"
+
+          if [ ! -f package-lock.json ] && [ ! -f npm-shrinkwrap.json ]; then
+            echo "::error::package-lock.json या npm-shrinkwrap.json आवश्यक है"
+            echo "पहले local machine पर npm install चलाकर package-lock.json commit करें"
+            exit 1
+          fi
+
+      - name: Print tool versions
+        run: |
+          node --version
+          npm --version
+          git --version
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Run build
+        shell: bash
+        env:
+          CI: true
+        run: |
+          set -Eeuo pipefail
+          npm run build
+
+      - name: Verify build output
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [ ! -d "${BUILD_OUTPUT_DIR}" ]; then
+            echo "::error::${BUILD_OUTPUT_DIR}/ folder generate नहीं हुआ"
+            echo "Build command ने expected output directory नहीं बनाई"
+            exit 1
+          fi
+
+          if [ -z "$(find "${BUILD_OUTPUT_DIR}" -mindepth 1 -print -quit)" ]; then
+            echo "::error::${BUILD_OUTPUT_DIR}/ folder खाली है"
+            exit 1
+          fi
+
+          echo "Build output successfully verified:"
+          du -sh "${BUILD_OUTPUT_DIR}"
+
+      - name: Show changed files
+        run: |
+          git status --short
+
+      - name: Commit and push generated files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # public फ़ोल्डर में जो भी बदलाव हुए हैं उन्हें स्टेज करें
-          git add public/
-          
-          # अगर कोई नया बदलाव हुआ है तभी कमिट करें, वरना स्किप करें
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update jobs [skip ci]" && git push)
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A public/
+
+          if git diff --cached --quiet; then
+            echo "public/ में कोई बदलाव नहीं है। Commit आवश्यक नहीं।"
+            exit 0
+          fi
+
+          git commit -m "chore: auto-update jobs [skip ci]"
+
+          for attempt in 1 2 3; do
+            echo "Push attempt ${attempt}/3"
+
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "Changes successfully pushed."
+              exit 0
+            fi
+
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::तीन प्रयासों के बाद push fail हुआ"
+              exit 1
+            fi
+
+            echo "Remote branch बदल चुकी है। Latest changes fetch करके rebase किया जा रहा है..."
+            git fetch origin "${GITHUB_REF_NAME}"
+            git rebase "origin/${GITHUB_REF_NAME}"
+          done
+
+      - name: Failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          echo "===== Git status ====="
+          git status --short || true
+
+          echo "===== Last commits ====="
+          git log -5 --oneline || true
+
+          echo "===== Workspace files ====="
+          find . -maxdepth 2 -type f \
+            ! -path "./.git/*" \
+            ! -path "./node_modules/*" \
+            | sort | head -200 || true
