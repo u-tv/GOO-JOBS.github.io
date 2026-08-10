@@ -1,0 +1,77 @@
+name: Daily Real Jobs Sync
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # रोज 00:00 UTC = भारत में सुबह 05:30
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-real-jobs-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Generate real jobs
+        env:
+          SITE_URL: https://goojobs.vercel.app
+          TARGET_JOBS: "5000"
+          MAX_AGE_DAYS: "30"
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+        run: npm run build
+
+      - name: Commit generated site
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A public/
+
+          if git diff --cached --quiet; then
+            echo "No changes found"
+            exit 0
+          fi
+
+          git commit -m "chore: daily real jobs update [skip ci]"
+
+      - name: Push with retry
+        run: |
+          set -e
+
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Push successful"
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "Push failed after 3 attempts"
+              exit 1
+            fi
+
+            git fetch origin main
+            git rebase origin/main
+          done
