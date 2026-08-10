@@ -1,212 +1,107 @@
 #!/usr/bin/env node
 /**
- * GOO-JOBS v4 — ADVANCED BUILD ENGINE
- * ------------------------------------
- * Multi-source Job Aggregator
+ * GOO JOBS — FINAL ADVANCED AUTO-SYNC ENGINE
+ * ==========================================
  *
- * Features:
- * - 8+ job sources
- * - Persistent HTTP cache
- * - Retry + exponential backoff + jitter
- * - Per-source timeout
- * - Concurrency control
- * - Rate limiting
- * - Smart deduplication
- * - Previous-data preservation
- * - Job expiry / retention
- * - Job scoring
- * - Indian + Remote filtering
- * - SEO JobPosting JSON-LD
- * - Individual static job pages
- * - Chunked sitemap generation
- * - robots.txt
- * - source-status.json
- * - build manifest
- * - metrics
- * - atomic writes
- * - stale-data protection
- * - graceful shutdown
+ * Real jobs only • No dummy jobs • No fake fallback jobs
+ * Multi-source aggregation • Automatic deduplication
+ * Greenhouse • Lever • Arbeitnow • Remotive • RSS
+ * NCS/India sources when publicly accessible
+ * Optional API sources
  *
- * Node.js: 18+
- * Run:
+ * Node.js 20+
+ *
+ * RUN:
  *   node generate.js
+ *
+ * ENV:
+ *   TARGET_JOBS=5000
+ *   RETENTION_DAYS=45
+ *
+ * IMPORTANT:
+ * A target of 5000 means "keep up to 5000 verified current jobs".
+ * It does NOT manufacture jobs when the live sources contain fewer.
  */
 
 'use strict';
 
 const fs = require('node:fs/promises');
-const fss = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const http = require('node:http');
 
-/* ============================================================
-   1. CONFIGURATION
-============================================================ */
+// ============================================================
+// CONFIG
+// ============================================================
 
 const ROOT = path.resolve(__dirname);
-
 const PUBLIC = path.join(ROOT, 'public');
-const JOBS_DIR = path.join(PUBLIC, 'job');
-
-const CACHE_DIR = path.join(ROOT, '.cache');
-const HTTP_CACHE_DIR = path.join(CACHE_DIR, 'http');
-
+const JOB_DIR = path.join(PUBLIC, 'job');
 const LOG_DIR = path.join(ROOT, 'logs');
-
-const DATA_FILE = path.join(PUBLIC, 'jobs.json');
-const MANIFEST_FILE = path.join(PUBLIC, 'build-manifest.json');
-const STATUS_FILE = path.join(PUBLIC, 'source-status.json');
+const CACHE_DIR = path.join(ROOT, '.cache');
 
 const SITE_URL =
   (process.env.SITE_URL || 'https://goojobs.in').replace(/\/+$/, '');
 
-const SITE_NAME =
-  process.env.SITE_NAME || 'GOO JOBS';
+const TARGET_JOBS = Math.max(
+  1,
+  Number.parseInt(process.env.TARGET_JOBS || '5000', 10)
+);
 
-const TARGET =
-  Math.max(1, parseInt(process.env.TARGET_JOBS || '5000', 10));
+const RETENTION_DAYS = Math.max(
+  1,
+  Number.parseInt(process.env.RETENTION_DAYS || '45', 10)
+);
 
-const RETENTION_DAYS =
-  Math.max(1, parseInt(process.env.RETENTION_DAYS || '45', 10));
+const TIMEOUT_MS = Math.max(
+  5000,
+  Number.parseInt(process.env.TIMEOUT_MS || '30000', 10)
+);
 
-const TIMEOUT =
-  Math.max(3000, parseInt(process.env.TIMEOUT_MS || '30000', 10));
+const MAX_RETRIES = Math.max(
+  1,
+  Number.parseInt(process.env.MAX_RETRIES || '4', 10)
+);
 
-const MAX_RETRY =
-  Math.max(1, parseInt(process.env.MAX_RETRIES || '5', 10));
+const CONCURRENCY = Math.max(
+  1,
+  Number.parseInt(process.env.CONCURRENCY || '8', 10)
+);
 
-const CONCURRENCY =
-  Math.max(1, parseInt(process.env.CONCURRENCY || '10', 10));
+const CACHE_TTL_MS = Math.max(
+  0,
+  Number.parseInt(process.env.CACHE_TTL_MS || '300000', 10)
+);
 
-const SOURCE_CONCURRENCY =
-  Math.max(
-    1,
-    parseInt(process.env.SOURCE_CONCURRENCY || '8', 10)
-  );
+const ARBEIT_PAGES = Math.max(
+  1,
+  Number.parseInt(process.env.ARBEIT_PAGES || '50', 10)
+);
 
-const RPM =
-  Math.max(1, parseInt(process.env.RATE_LIMIT_RPM || '60', 10));
+const HEALTH_PORT = Number.parseInt(
+  process.env.HEALTH_CHECK_PORT || '0',
+  10
+);
 
-const CACHE_TTL =
-  Math.max(
-    1000,
-    parseInt(process.env.CACHE_TTL_MS || '300000', 10)
-  );
-
-const HTTP_CACHE_TTL =
-  Math.max(
-    1000,
-    parseInt(
-      process.env.HTTP_CACHE_TTL_MS || String(6 * 60 * 60 * 1000),
-      10
-    )
-  );
-
-const ARBEIT_PAGES =
-  Math.max(1, parseInt(process.env.ARBEIT_PAGES || '50', 10));
-
-const SITEMAP_CHUNK_SIZE =
-  Math.max(
-    100,
-    parseInt(process.env.SITEMAP_CHUNK_SIZE || '45000', 10)
-  );
-
-const MIN_DESCRIPTION =
-  Math.max(
-    0,
-    parseInt(process.env.MIN_DESCRIPTION_LENGTH || '20', 10)
-  );
-
-const ENABLE_CACHE =
-  process.env.ENABLE_CACHE !== 'false';
-
-const ENABLE_METRICS =
-  process.env.ENABLE_METRICS !== 'false';
-
-const ENABLE_PERSISTENT_CACHE =
-  process.env.ENABLE_PERSISTENT_CACHE !== 'false';
-
-const ENABLE_SITEMAP_INDEX =
-  process.env.ENABLE_SITEMAP_INDEX !== 'false';
-
-const ENABLE_JOB_PAGES =
-  process.env.ENABLE_JOB_PAGES !== 'false';
-
-const ENABLE_ROBOTS =
-  process.env.ENABLE_ROBOTS !== 'false';
-
-const ENABLE_HEALTH =
-  process.env.HEALTH_CHECK_PORT &&
-  parseInt(process.env.HEALTH_CHECK_PORT, 10) > 0;
-
-const HEALTH_PORT =
-  parseInt(process.env.HEALTH_CHECK_PORT || '0', 10);
-
-const KEEP_PREVIOUS_ON_FAILURE =
-  process.env.KEEP_PREVIOUS_ON_FAILURE !== 'false';
-
-const ALLOW_REMOTE =
-  process.env.ALLOW_REMOTE !== 'false';
-
-const BLACKLIST = (
-  process.env.BLACKLISTED_DOMAINS || ''
-)
+const BLACKLISTED_DOMAINS = (process.env.BLACKLISTED_DOMAINS || '')
   .split(',')
-  .map(s => s.trim().toLowerCase())
+  .map(x => x.trim().toLowerCase())
   .filter(Boolean);
 
-const ADSTERRA =
-  process.env.ADSTERRA_SMARTLINK_SCRIPT || '';
-
-const ADSTERRA_TOKEN =
-  '<!--ADSTERRA_SMARTLINK-->';
-
-/* ============================================================
-   2. SOURCE CONFIG
-============================================================ */
-
-const INDIAN_API_KEY =
-  process.env.INDIAN_API_KEY || '';
-
-const JOBDATA_KEY =
-  process.env.JOBDATA_API_KEY || '';
-
-const GH_BOARDS = (
+const GREENHOUSE_BOARDS = (
   process.env.GREENHOUSE_BOARDS ||
-  [
-    'stripe',
-    'airbnb',
-    'netflix',
-    'spotify',
-    'uber',
-    'lyft',
-    'slack',
-    'discord',
-    'notion',
-    'figma'
-  ].join(',')
+  'stripe,airbnb,netflix,spotify,uber,lyft,slack,discord,notion,figma'
 )
   .split(',')
-  .map(s => s.trim())
+  .map(x => x.trim())
   .filter(Boolean);
 
 const LEVER_BOARDS = (
   process.env.LEVER_BOARDS ||
-  [
-    'flipkart',
-    'swiggy',
-    'razorpay',
-    'zerodha',
-    'phonepe',
-    'cred',
-    'meesho',
-    'unacademy',
-    'vedantu'
-  ].join(',')
+  'flipkart,swiggy,razorpay,zerodha,phonepe,cred,meesho,unacademy,vedantu'
 )
   .split(',')
-  .map(s => s.trim())
+  .map(x => x.trim())
   .filter(Boolean);
 
 const RSS_FEEDS = (
@@ -214,64 +109,103 @@ const RSS_FEEDS = (
   'https://remotive.com/remote-jobs/feed'
 )
   .split('|')
-  .map(s => s.trim())
+  .map(x => x.trim())
   .filter(Boolean);
 
-/* ============================================================
-   3. GLOBAL STATE
-============================================================ */
+const INDIAN_API_KEY = process.env.INDIAN_API_KEY || '';
+const JOBDATA_API_KEY = process.env.JOBDATA_API_KEY || '';
 
-const BUILD_ID =
-  crypto.randomBytes(8).toString('hex');
+const ADSTERRA_SCRIPT =
+  process.env.ADSTERRA_SMARTLINK_SCRIPT || '';
 
-const BUILD_STARTED_AT =
-  new Date().toISOString();
+const USER_AGENT =
+  'GOO-JOBS-Aggregator/Final (+https://goojobs.in)';
+
+// ============================================================
+// LOGGER
+// ============================================================
 
 const metrics = {
-  buildId: BUILD_ID,
-  startedAt: BUILD_STARTED_AT,
+  startedAt: new Date().toISOString(),
   finishedAt: null,
   durationMs: 0,
-
   rawJobs: 0,
   validJobs: 0,
   duplicateJobs: 0,
+  expiredJobs: 0,
   finalJobs: 0,
-
-  pagesGenerated: 0,
-
   sources: {},
-  errors: [],
-  warnings: []
+  errors: []
 };
 
-/* ============================================================
-   4. UTILITY FUNCTIONS
-============================================================ */
+function log(level, message, extra = {}) {
+  const payload = {
+    time: new Date().toISOString(),
+    level,
+    message,
+    ...extra
+  };
 
-const sleep = ms =>
-  new Promise(resolve => setTimeout(resolve, ms));
-
-function nowIso() {
-  return new Date().toISOString();
+  process.stdout.write(JSON.stringify(payload) + '\n');
 }
 
-function safeDate(value, fallback = new Date()) {
-  if (!value) return fallback;
+function info(message, extra) {
+  log('INFO', message, extra);
+}
 
-  const d = new Date(value);
+function warn(message, extra) {
+  log('WARN', message, extra);
+}
 
-  if (Number.isNaN(d.getTime())) {
+function error(message, extra) {
+  log('ERROR', message, extra);
+
+  metrics.errors.push({
+    message,
+    ...extra
+  });
+}
+
+// ============================================================
+// FILE UTILITIES
+// ============================================================
+
+async function ensureDirectories() {
+  await fs.mkdir(PUBLIC, { recursive: true });
+  await fs.mkdir(JOB_DIR, { recursive: true });
+  await fs.mkdir(LOG_DIR, { recursive: true });
+  await fs.mkdir(CACHE_DIR, { recursive: true });
+}
+
+async function atomicWrite(file, content) {
+  const tmp = `${file}.${process.pid}.tmp`;
+
+  await fs.writeFile(tmp, content, 'utf8');
+  await fs.rename(tmp, file);
+}
+
+async function writeJSON(file, data) {
+  await atomicWrite(
+    file,
+    JSON.stringify(data, null, 2)
+  );
+}
+
+async function readJSON(file, fallback = null) {
+  try {
+    const text = await fs.readFile(file, 'utf8');
+    return JSON.parse(text);
+  } catch {
     return fallback;
   }
-
-  return d;
 }
 
-function esc(value) {
-  if (value == null) return '';
+// ============================================================
+// STRING UTILITIES
+// ============================================================
 
-  return String(value)
+function escapeHTML(value) {
+  return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -279,37 +213,36 @@ function esc(value) {
     .replace(/'/g, '&#39;');
 }
 
-function stripHtml(html) {
-  if (!html) return '';
+function stripHTML(value) {
+  if (!value) return '';
 
-  return String(html)
-    .replace(
-      /<script[\s\S]*?<\/script>/gi,
-      ' '
-    )
-    .replace(
-      /<style[\s\S]*?<\/style>/gi,
-      ' '
-    )
-    .replace(
-      /<noscript[\s\S]*?<\/noscript>/gi,
-      ' '
-    )
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n')
+  return String(value)
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
+    .replace(/&#x27;/gi, "'")
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function cleanText(value) {
-  return stripHtml(value)
+function normalizeText(value) {
+  return stripHTML(value)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function hash(value) {
+  return crypto
+    .createHash('sha256')
+    .update(String(value))
+    .digest('hex')
+    .slice(0, 20);
 }
 
 function slugify(value) {
@@ -320,99 +253,252 @@ function slugify(value) {
     .replace(/[_\s]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
-    .substring(0, 90) || 'job';
+    .slice(0, 90) || 'job';
 }
 
-function hashId(seed) {
-  return crypto
-    .createHash('sha256')
-    .update(String(seed || '').toLowerCase())
-    .digest('hex')
-    .substring(0, 20);
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
-function normalizeUrl(url) {
-  if (!url) return '';
+// ============================================================
+// XML / RSS UTILITIES
+// ============================================================
+
+function decodeXML(value) {
+  return String(value || '')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, '$1')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x27;/gi, "'");
+}
+
+function xmlTag(block, tag) {
+  const safeTag = tag.replace(':', '\\:');
+
+  const regex = new RegExp(
+    `<${safeTag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${safeTag}>`,
+    'i'
+  );
+
+  const match = block.match(regex);
+
+  return match ? decodeXML(match[1]).trim() : '';
+}
+
+function parseRSS(xml) {
+  const items =
+    xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
+
+  return items.map(item => ({
+    title: stripHTML(xmlTag(item, 'title')),
+    link: stripHTML(
+      xmlTag(item, 'link') ||
+      xmlTag(item, 'guid')
+    ),
+    description: stripHTML(
+      xmlTag(item, 'description') ||
+      xmlTag(item, 'content:encoded')
+    ),
+    publishedAt:
+      xmlTag(item, 'pubDate') ||
+      xmlTag(item, 'published') ||
+      xmlTag(item, 'dc:date'),
+    category: stripHTML(
+      xmlTag(item, 'category')
+    )
+  }));
+}
+
+// ============================================================
+// CACHE
+// ============================================================
+
+class DiskCache {
+  constructor() {
+    this.memory = new Map();
+  }
+
+  key(url) {
+    return hash(url);
+  }
+
+  async get(url) {
+    if (!CACHE_TTL_MS) return null;
+
+    const key = this.key(url);
+
+    const memory = this.memory.get(key);
+
+    if (
+      memory &&
+      Date.now() - memory.time < CACHE_TTL_MS
+    ) {
+      return memory.value;
+    }
+
+    try {
+      const file = path.join(CACHE_DIR, `${key}.json`);
+      const cached = await readJSON(file);
+
+      if (
+        cached &&
+        Date.now() - cached.time < CACHE_TTL_MS
+      ) {
+        this.memory.set(key, cached);
+
+        return cached.value;
+      }
+    } catch {}
+
+    return null;
+  }
+
+  async set(url, value) {
+    if (!CACHE_TTL_MS) return;
+
+    const key = this.key(url);
+
+    const data = {
+      time: Date.now(),
+      value
+    };
+
+    this.memory.set(key, data);
+
+    await writeJSON(
+      path.join(CACHE_DIR, `${key}.json`),
+      data
+    ).catch(() => {});
+  }
+}
+
+const cache = new DiskCache();
+
+// ============================================================
+// HTTP
+// ============================================================
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchText(url, options = {}) {
+  const cached = await cache.get(url);
+
+  if (cached !== null) {
+    return cached;
+  }
+
+  let lastError;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+
+    const timer = setTimeout(
+      () => controller.abort(),
+      TIMEOUT_MS
+    );
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          'User-Agent': USER_AGENT,
+          'Accept':
+            'application/json, application/rss+xml, text/xml, text/plain, */*',
+          ...(options.headers || {})
+        }
+      });
+
+      clearTimeout(timer);
+
+      if (!response.ok) {
+        throw new Error(
+          `HTTP ${response.status} ${response.statusText}`
+        );
+      }
+
+      const text = await response.text();
+
+      await cache.set(url, text);
+
+      return text;
+    } catch (err) {
+      clearTimeout(timer);
+      lastError = err;
+
+      if (attempt < MAX_RETRIES - 1) {
+        await sleep(
+          Math.min(
+            10000,
+            750 * Math.pow(2, attempt)
+          )
+        );
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+async function fetchJSON(url, options = {}) {
+  const text = await fetchText(url, options);
 
   try {
-    const u = new URL(String(url));
-
-    u.hash = '';
-
-    [
-      'utm_source',
-      'utm_medium',
-      'utm_campaign',
-      'utm_term',
-      'utm_content',
-      'fbclid',
-      'gclid'
-    ].forEach(k => u.searchParams.delete(k));
-
-    return u.toString();
-  } catch (_) {
-    return String(url).trim();
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Invalid JSON response from ${url}`
+    );
   }
 }
 
-function domainOf(url) {
-  try {
-    return new URL(url).hostname
-      .toLowerCase()
-      .replace(/^www\./, '');
-  } catch (_) {
-    return '';
-  }
-}
+async function mapLimit(items, limit, worker) {
+  const result = new Array(items.length);
+  let cursor = 0;
 
-function timeAgo(iso) {
-  const d = safeDate(iso);
+  const workers = Array.from(
+    {
+      length: Math.min(
+        limit,
+        items.length || 1
+      )
+    },
+    async () => {
+      while (true) {
+        const index = cursor++;
 
-  const diff =
-    Math.max(0, Date.now() - d.getTime()) / 1000;
+        if (index >= items.length) break;
 
-  if (diff < 60) {
-    return `${Math.floor(diff)}s ago`;
-  }
+        try {
+          result[index] = await worker(
+            items[index],
+            index
+          );
+        } catch (err) {
+          result[index] = {
+            error: err
+          };
+        }
+      }
+    }
+  );
 
-  if (diff < 3600) {
-    return `${Math.floor(diff / 60)}m ago`;
-  }
-
-  if (diff < 86400) {
-    return `${Math.floor(diff / 3600)}h ago`;
-  }
-
-  if (diff < 30 * 86400) {
-    return `${Math.floor(diff / 86400)}d ago`;
-  }
-
-  return d.toISOString().substring(0, 10);
-}
-
-function unique(array) {
-  return [...new Set(array.filter(Boolean))];
-}
-
-function chunk(array, size) {
-  const result = [];
-
-  for (let i = 0; i < array.length; i += size) {
-    result.push(array.slice(i, i + size));
-  }
+  await Promise.all(workers);
 
   return result;
 }
 
-/* ============================================================
-   5. INDIAN LOCATION DETECTION
-============================================================ */
+// ============================================================
+// LOCATION
+// ============================================================
 
 const INDIAN_LOCATIONS = [
   'india',
-  'remote',
-  'wfh',
-  'work from home',
   'mumbai',
   'delhi',
   'new delhi',
@@ -435,401 +521,106 @@ const INDIAN_LOCATIONS = [
   'kanpur',
   'nagpur',
   'indore',
-  'thane',
   'bhopal',
-  'visakhapatnam',
-  'patna',
-  'vadodara',
-  'coimbatore',
-  'kochi',
-  'cochin',
-  'mysore',
-  'mysuru',
   'chandigarh',
-  'nashik',
-  'rajkot',
-  'goa',
-  'trivandrum',
-  'thiruvananthapuram',
-  'mangalore',
-  'madurai',
-  'salem',
-  'trichy',
-  'tiruchirappalli',
-  'puducherry',
-  'shillong',
-  'guwahati',
+  'kochi',
+  'coimbatore',
+  'vadodara',
+  'patna',
   'ranchi',
-  'jamshedpur',
   'bhubaneswar',
-  'cuttack',
   'dehradun',
   'haridwar',
   'ludhiana',
   'amritsar',
   'jalandhar',
   'patiala',
-  'bathinda',
-  'gwalior',
-  'jabalpur',
-  'ujjain',
-  'raipur',
-  'bilaspur',
-  'durg',
-  'bhilai',
-  'siliguri',
-  'asansol',
-  'durgapur',
-  'howrah',
-  'dhanbad',
-  'bokaro',
-  'gorakhpur',
-  'varanasi',
-  'prayagraj',
-  'allahabad',
-  'agra',
-  'meerut',
-  'aligarh',
-  'bareilly',
-  'moradabad',
-  'saharanpur',
-  'nainital',
-  'haldwani',
-  'roorkee',
-  'rishikesh',
-  'mussoorie',
-  'shimla',
-  'manali',
-  'dharamshala',
-  'solan',
-  'mandi',
-  'una',
-  'hamirpur',
-  'kangra',
-  'panchkula',
-  'ambala',
-  'karnal',
-  'panipat',
   'sonipat',
+  'panipat',
   'rohtak',
-  'jhajjar',
-  'rewari',
-  'mahendragarh',
-  'bhiwani',
   'hisar',
-  'fatehabad',
+  'karnal',
+  'kurukshetra',
+  'yamunanagar',
+  'ambala',
   'sirsa',
+  'fatehabad',
+  'rewari',
+  'bhiwani',
   'jind',
   'kaithal',
-  'yamunanagar',
-  'kurukshetra',
-  'thanesar'
+  'shimla',
+  'goa',
+  'remote',
+  'work from home',
+  'wfh',
+  'anywhere'
 ];
 
-function isIndianLocation(location) {
-  if (!location) return false;
-
-  const text =
-    String(location).toLowerCase();
+function isIndiaOrRemote(location, text = '') {
+  const value =
+    `${location || ''} ${text || ''}`.toLowerCase();
 
   return INDIAN_LOCATIONS.some(
-    city => text.includes(city)
+    item => value.includes(item)
   );
 }
 
-/* ============================================================
-   6. SKILL ENGINE
-============================================================ */
+// ============================================================
+// JOB NORMALIZATION
+// ============================================================
 
-const SKILLS = [
-  'javascript',
-  'typescript',
-  'react',
-  'react native',
-  'node',
-  'nodejs',
-  'angular',
-  'vue',
-  'nextjs',
-  'nuxt',
-  'svelte',
-  'python',
-  'django',
-  'flask',
-  'fastapi',
-  'java',
-  'spring',
-  'springboot',
-  'kotlin',
-  'swift',
-  'objective-c',
-  'c++',
-  'c#',
-  '.net',
-  'dotnet',
-  'go',
-  'golang',
-  'rust',
-  'ruby',
-  'rails',
-  'php',
-  'laravel',
-  'symfony',
-  'sql',
-  'mysql',
-  'postgresql',
-  'mongodb',
-  'redis',
-  'elasticsearch',
-  'kafka',
-  'aws',
-  'azure',
-  'gcp',
-  'docker',
-  'kubernetes',
-  'terraform',
-  'ansible',
-  'jenkins',
-  'github actions',
-  'gitlab',
-  'html',
-  'css',
-  'sass',
-  'scss',
-  'tailwind',
-  'bootstrap',
-  'graphql',
-  'rest api',
-  'microservices',
-  'machine learning',
-  'deep learning',
-  'nlp',
-  'data science',
-  'tensorflow',
-  'pytorch',
-  'pandas',
-  'numpy',
-  'scikit-learn',
-  'power bi',
-  'tableau',
-  'excel',
-  'powerpoint',
-  'figma',
-  'adobe',
-  'photoshop',
-  'illustrator',
-  'canva',
-  'seo',
-  'sem',
-  'google ads',
-  'digital marketing',
-  'content writing',
-  'copywriting',
-  'product management',
-  'agile',
-  'scrum',
-  'jira',
-  'confluence',
-  'notion',
-  'slack',
-  'teams',
-  'zoom',
-  'ios',
-  'android',
-  'flutter',
-  'devops',
-  'sre',
-  'security',
-  'cybersecurity',
-  'linux',
-  'ubuntu',
-  'sap',
-  'oracle',
-  'tally',
-  'accounting',
-  'taxation',
-  'gst',
-  'banking',
-  'finance',
-  'investment',
-  'hr',
-  'recruitment',
-  'talent acquisition',
-  'payroll',
-  'sales',
-  'marketing',
-  'business development',
-  'customer support',
-  'operations',
-  'supply chain',
-  'logistics',
-  'procurement',
-  'warehouse',
-  'data entry',
-  'typing',
-  'ms office',
-  'word',
-  'outlook',
-  'crm',
-  'salesforce',
-  'hubspot',
-  'zoho',
-  'blockchain',
-  'web3',
-  'solidity',
-  'ethereum',
-  'bitcoin',
-  'nft',
-  'smart contracts',
-  'defi',
-  'ai',
-  'generative ai',
-  'llm',
-  'openai',
-  'chatgpt',
-  'claude',
-  'gemini',
-  'midjourney',
-  'data engineering',
-  'etl',
-  'airflow',
-  'dbt',
-  'snowflake',
-  'bigquery',
-  'redshift',
-  'databricks',
-  'spark',
-  'hadoop',
-  'hive',
-  'streaming',
-  'analytics',
-  'ui/ux',
-  'user research',
-  'wireframing',
-  'prototyping',
-  'design systems',
-  'accessibility',
-  'qa',
-  'testing',
-  'automation',
-  'selenium',
-  'cypress',
-  'playwright',
-  'junit',
-  'jest',
-  'mocha',
-  'api testing',
-  'postman',
-  'swagger',
-  'openapi',
-  'grpc',
-  'protobuf',
-  'websocket',
-  'socket.io',
-  'git',
-  'github',
-  'gitlab',
-  'bitbucket',
-  'ci/cd',
-  'devsecops',
-  'observability',
-  'prometheus',
-  'grafana',
-  'splunk',
-  'datadog',
-  'networking',
-  'tcp/ip',
-  'dns',
-  'dhcp',
-  'vpn',
-  'firewall',
-  'load balancer',
-  'cdn',
-  'cloudflare',
-  'vercel',
-  'netlify',
-  'firebase',
-  'supabase',
-  'appwrite',
-  'strapi',
-  'contentful',
-  'wordpress',
-  'drupal',
-  'joomla',
-  'magento',
-  'shopify',
-  'woocommerce',
-  'express',
-  'koa',
-  'fastify',
-  'nestjs',
-  'jquery',
-  'redux',
-  'mobx',
-  'zustand',
-  'prisma',
-  'sequelize',
-  'mongoose',
-  'typeorm',
-  'graphql'
-];
+function parseDate(value) {
+  if (!value) return null;
 
-function extractSkills(text) {
-  if (!text) return [];
+  const date = new Date(value);
 
-  const source =
-    String(text)
-      .toLowerCase()
-      .replace(/[^\w+#./\s-]/g, ' ');
-
-  const found = [];
-
-  for (const skill of SKILLS) {
-    const escaped =
-      skill.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-    const regex =
-      new RegExp(
-        `(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`,
-        'i'
-      );
-
-    if (regex.test(source)) {
-      found.push(
-        skill.charAt(0).toUpperCase() +
-        skill.slice(1)
-      );
-    }
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getTime() <= 0
+  ) {
+    return null;
   }
 
-  return unique(found).slice(0, 15);
+  return date.toISOString();
 }
 
-/* ============================================================
-   7. JOB CLASSIFICATION
-============================================================ */
-
-function detectExperience(title, description = '') {
+function detectRemote(title, description, location) {
   const text =
-    `${title} ${description}`.toLowerCase();
+    `${title} ${description} ${location}`.toLowerCase();
+
+  return /\bremote\b|\bwfh\b|work from home|work-from-home|anywhere|distributed team/i
+    .test(text);
+}
+
+function detectHybrid(title, description, location) {
+  const text =
+    `${title} ${description} ${location}`.toLowerCase();
+
+  return /\bhybrid\b|partially remote|flexible work/i
+    .test(text);
+}
+
+function detectExperience(title) {
+  const t = String(title || '').toLowerCase();
 
   if (
-    /\b(intern|internship|trainee|apprentice|graduate)\b/
-      .test(text)
+    /\bintern\b|\binternship\b|\btrainee\b|\bgraduate\b|\bapprentice\b|\bfresher\b/
+      .test(t)
   ) {
-    return 'Internship';
+    return 'Internship / Fresher';
   }
 
   if (
-    /\b(senior|sr\.?|lead|principal|staff|head|director|vp|chief|architect|cto|ceo)\b/
-      .test(text)
+    /\bsenior\b|\bsr\.?\b|\blead\b|\bprincipal\b|\bstaff\b|\bhead\b|\bdirector\b|\barchitect\b/
+      .test(t)
   ) {
     return 'Senior';
   }
 
   if (
-    /\b(junior|jr\.?|associate|entry|fresher|beginner|starter)\b/
-      .test(text)
+    /\bjunior\b|\bjr\.?\b|\bassociate\b|\bentry\b|\bentry-level\b/
+      .test(t)
   ) {
     return 'Entry';
   }
@@ -837,1313 +628,784 @@ function detectExperience(title, description = '') {
   return 'Mid';
 }
 
-function detectCategory(title, description) {
-  const text =
-    `${title} ${description}`.toLowerCase();
-
-  const categories = [
-    ['Software & IT', [
-      'developer',
-      'software',
-      'engineer',
-      'frontend',
-      'backend',
-      'full stack',
-      'devops',
-      'programmer'
-    ]],
-
-    ['Data & AI', [
-      'data scientist',
-      'data analyst',
-      'machine learning',
-      'artificial intelligence',
-      'ai engineer',
-      'data engineer'
-    ]],
-
-    ['Finance', [
-      'accountant',
-      'finance',
-      'banking',
-      'financial',
-      'tax',
-      'audit'
-    ]],
-
-    ['Sales & Marketing', [
-      'sales',
-      'marketing',
-      'seo',
-      'business development',
-      'growth'
-    ]],
-
-    ['HR & Recruitment', [
-      'human resources',
-      'hr ',
-      'recruiter',
-      'recruitment',
-      'talent acquisition'
-    ]],
-
-    ['Design', [
-      'designer',
-      'ui/ux',
-      'ux designer',
-      'graphic designer',
-      'product designer'
-    ]],
-
-    ['Customer Support', [
-      'customer support',
-      'customer service',
-      'support executive'
-    ]],
-
-    ['Operations', [
-      'operations',
-      'logistics',
-      'supply chain',
-      'procurement'
-    ]]
+function extractSkills(text) {
+  const skills = [
+    'javascript',
+    'typescript',
+    'react',
+    'react native',
+    'next.js',
+    'node.js',
+    'nodejs',
+    'express',
+    'angular',
+    'vue',
+    'python',
+    'django',
+    'flask',
+    'fastapi',
+    'java',
+    'spring',
+    'kotlin',
+    'swift',
+    'c++',
+    'c#',
+    '.net',
+    'go',
+    'golang',
+    'rust',
+    'php',
+    'laravel',
+    'ruby',
+    'rails',
+    'sql',
+    'mysql',
+    'postgresql',
+    'mongodb',
+    'redis',
+    'graphql',
+    'rest api',
+    'aws',
+    'azure',
+    'gcp',
+    'docker',
+    'kubernetes',
+    'terraform',
+    'jenkins',
+    'github actions',
+    'git',
+    'linux',
+    'devops',
+    'data science',
+    'machine learning',
+    'deep learning',
+    'tensorflow',
+    'pytorch',
+    'pandas',
+    'numpy',
+    'excel',
+    'power bi',
+    'tableau',
+    'figma',
+    'photoshop',
+    'seo',
+    'digital marketing',
+    'content writing',
+    'sales',
+    'marketing',
+    'finance',
+    'accounting',
+    'hr',
+    'recruitment',
+    'customer support',
+    'operations',
+    'supply chain',
+    'logistics',
+    'data entry',
+    'tally',
+    'sap',
+    'cybersecurity',
+    'qa',
+    'testing',
+    'selenium',
+    'playwright',
+    'flutter',
+    'android',
+    'ios',
+    'blockchain',
+    'solidity',
+    'web3',
+    'ai',
+    'generative ai',
+    'llm'
   ];
 
-  for (const [name, words] of categories) {
-    if (words.some(word => text.includes(word))) {
-      return name;
-    }
-  }
-
-  return 'General';
-}
-
-function detectEmploymentType(text) {
-  const t = String(text || '').toLowerCase();
-
-  if (/\binternship\b|\bintern\b/.test(t)) {
-    return 'Internship';
-  }
-
-  if (/\bpart[- ]?time\b/.test(t)) {
-    return 'Part-time';
-  }
-
-  if (/\bcontract\b|\bfreelance\b/.test(t)) {
-    return 'Contract';
-  }
-
-  if (/\btemporary\b/.test(t)) {
-    return 'Temporary';
-  }
-
-  return 'Full-time';
-}
-
-function detectRemote(text) {
-  const t =
-    String(text || '').toLowerCase();
-
-  return {
-    remote:
-      /\bremote\b|\bwfh\b|work from home|work-from-home|distributed team|anywhere/.test(t),
-
-    hybrid:
-      /\bhybrid\b|partially remote|flexible.*office/.test(t)
-  };
-}
-
-/* ============================================================
-   8. SALARY PARSER
-============================================================ */
-
-function parseSalary(value) {
-  if (!value) return null;
-
-  const raw =
-    String(value).trim();
-
-  const normalized =
-    raw
-      .replace(/,/g, '')
-      .replace(/\s+/g, ' ');
-
-  const matches = [
-    ...normalized.matchAll(
-      /(?:₹|rs\.?|inr|\$)?\s*(\d+(?:\.\d+)?)\s*(k|l|lakh|lac|lakhs|lpa|cr|crore)?/gi
-    )
-  ];
-
-  if (!matches.length) {
-    return null;
-  }
-
-  const numbers = [];
-
-  for (const match of matches) {
-    let number =
-      parseFloat(match[1]);
-
-    const unit =
-      String(match[2] || '')
-        .toLowerCase();
-
-    if (unit === 'k') {
-      number *= 1000;
-    } else if (
-      ['l', 'lakh', 'lac', 'lakhs', 'lpa']
-        .includes(unit)
-    ) {
-      number *= 100000;
-    } else if (
-      ['cr', 'crore'].includes(unit)
-    ) {
-      number *= 10000000;
-    }
-
-    if (Number.isFinite(number)) {
-      numbers.push(number);
-    }
-  }
-
-  if (!numbers.length) {
-    return null;
-  }
-
-  const min =
-    Math.min(...numbers);
-
-  const max =
-    numbers.length > 1
-      ? Math.max(...numbers)
-      : min * 1.2;
-
-  return {
-    min,
-    max,
-    currency:
-      raw.includes('$') ? 'USD' : 'INR',
-    raw
-  };
-}
-
-/* ============================================================
-   9. LOGGER
-============================================================ */
-
-class Logger {
-  constructor() {
-    this.errors = [];
-  }
-
-  log(level, message, extra = {}) {
-    const entry = {
-      time: nowIso(),
-      level,
-      message,
-      ...extra
-    };
-
-    try {
-      process.stdout.write(
-        JSON.stringify(entry) + '\n'
-      );
-    } catch (_) {}
-
-    if (level === 'error') {
-      this.errors.push(entry);
-    }
-  }
-
-  info(message, extra) {
-    this.log('info', message, extra);
-  }
-
-  warn(message, extra) {
-    this.log('warn', message, extra);
-  }
-
-  error(message, extra) {
-    this.log('error', message, extra);
-  }
-
-  async save() {
-    if (!ENABLE_METRICS) return;
-
-    await fs.mkdir(
-      LOG_DIR,
-      { recursive: true }
-    );
-
-    const file =
-      path.join(
-        LOG_DIR,
-        `build-${BUILD_ID}.json`
-      );
-
-    await atomicWrite(
-      file,
-      {
-        ...metrics,
-        errors: this.errors
-      },
-      true
-    );
-
-    await atomicWrite(
-      path.join(LOG_DIR, 'metrics.json'),
-      {
-        ...metrics,
-        errors: this.errors
-      },
-      true
-    );
-  }
-}
-
-const logger = new Logger();
-
-/* ============================================================
-   10. RATE LIMITER
-============================================================ */
-
-class RateLimiter {
-  constructor(rpm) {
-    this.rpm = rpm;
-    this.capacity = rpm;
-    this.tokens = rpm;
-    this.last = Date.now();
-  }
-
-  async take() {
-    while (true) {
-      const now = Date.now();
-
-      const elapsed =
-        (now - this.last) / 60000;
-
-      this.tokens =
-        Math.min(
-          this.capacity,
-          this.tokens +
-          elapsed * this.rpm
-        );
-
-      this.last = now;
-
-      if (this.tokens >= 1) {
-        this.tokens -= 1;
-        return;
-      }
-
-      const wait =
-        ((1 - this.tokens) /
-          this.rpm) *
-        60000;
-
-      await sleep(
-        Math.max(50, wait)
-      );
-    }
-  }
-}
-
-const rateLimiter =
-  new RateLimiter(RPM);
-
-/* ============================================================
-   11. MEMORY CACHE
-============================================================ */
-
-class MemoryCache {
-  constructor() {
-    this.map = new Map();
-  }
-
-  key(url) {
-    return crypto
-      .createHash('md5')
-      .update(url)
-      .digest('hex');
-  }
-
-  get(url) {
-    if (!ENABLE_CACHE) return null;
-
-    const item =
-      this.map.get(this.key(url));
-
-    if (!item) return null;
-
-    if (
-      Date.now() - item.time >
-      CACHE_TTL
-    ) {
-      this.map.delete(this.key(url));
-      return null;
-    }
-
-    return item.value;
-  }
-
-  set(url, value) {
-    if (!ENABLE_CACHE) return;
-
-    this.map.set(
-      this.key(url),
-      {
-        time: Date.now(),
-        value
-      }
-    );
-  }
-}
-
-const memoryCache =
-  new MemoryCache();
-
-/* ============================================================
-   12. PERSISTENT HTTP CACHE
-============================================================ */
-
-async function persistentCachePath(url) {
-  const hash =
-    crypto
-      .createHash('sha256')
-      .update(url)
-      .digest('hex');
-
-  return path.join(
-    HTTP_CACHE_DIR,
-    `${hash}.json`
-  );
-}
-
-async function persistentCacheGet(url) {
-  if (
-    !ENABLE_CACHE ||
-    !ENABLE_PERSISTENT_CACHE
-  ) {
-    return null;
-  }
-
-  try {
-    const file =
-      await persistentCachePath(url);
-
-    const text =
-      await fs.readFile(
-        file,
-        'utf8'
-      );
-
-    const data =
-      JSON.parse(text);
-
-    if (
-      Date.now() - data.time >
-      HTTP_CACHE_TTL
-    ) {
-      return null;
-    }
-
-    return data.value;
-  } catch (_) {
-    return null;
-  }
-}
-
-async function persistentCacheSet(url, value) {
-  if (
-    !ENABLE_CACHE ||
-    !ENABLE_PERSISTENT_CACHE
-  ) {
-    return;
-  }
-
-  try {
-    await fs.mkdir(
-      HTTP_CACHE_DIR,
-      { recursive: true }
-    );
-
-    const file =
-      await persistentCachePath(url);
-
-    await atomicWrite(
-      file,
-      {
-        time: Date.now(),
-        value
-      },
-      true
-    );
-  } catch (e) {
-    logger.warn(
-      'Persistent cache write failed',
-      { error: e.message }
-    );
-  }
-}
-
-/* ============================================================
-   13. HTTP FETCH ENGINE
-============================================================ */
-
-async function fetchRetry(url, options = {}) {
-  const normalized =
-    normalizeUrl(url);
-
-  const memoryHit =
-    memoryCache.get(normalized);
-
-  if (memoryHit !== null) {
-    return memoryHit;
-  }
-
-  const diskHit =
-    await persistentCacheGet(
-      normalized
-    );
-
-  if (diskHit !== null) {
-    memoryCache.set(
-      normalized,
-      diskHit
-    );
-
-    return diskHit;
-  }
-
-  let lastError = null;
-
-  for (
-    let attempt = 1;
-    attempt <= MAX_RETRY;
-    attempt++
-  ) {
-    await rateLimiter.take();
-
-    const controller =
-      new AbortController();
-
-    const timeout =
-      setTimeout(
-        () => controller.abort(),
-        TIMEOUT
-      );
-
-    try {
-      const response =
-        await fetch(
-          normalized,
-          {
-            ...options,
-            signal:
-              controller.signal,
-
-            headers: {
-              'Accept':
-                'application/json, application/rss+xml, text/xml, text/html, */*',
-
-              'Accept-Encoding':
-                'gzip, deflate',
-
-              'User-Agent':
-                'GOO-JOBS/4.0 (+https://goojobs.in)',
-
-              ...(options.headers || {})
-            }
-          }
-        );
-
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        const retryable =
-          response.status === 408 ||
-          response.status === 425 ||
-          response.status === 429 ||
-          response.status >= 500;
-
-        if (!retryable) {
-          throw new Error(
-            `HTTP ${response.status}`
-          );
-        }
-
-        throw new Error(
-          `RETRYABLE_HTTP_${response.status}`
-        );
-      }
-
-      const text =
-        await response.text();
-
-      memoryCache.set(
-        normalized,
-        text
-      );
-
-      await persistentCacheSet(
-        normalized,
-        text
-      );
-
-      return text;
-
-    } catch (error) {
-      clearTimeout(timeout);
-
-      lastError = error;
-
-      if (
-        attempt >= MAX_RETRY
-      ) {
-        break;
-      }
-
-      const exponential =
-        Math.min(
-          10000,
-          500 *
-          Math.pow(2, attempt - 1)
-        );
-
-      const jitter =
-        Math.floor(
-          Math.random() * 400
-        );
-
-      await sleep(
-        exponential + jitter
-      );
-    }
-  }
-
-  throw lastError ||
-    new Error(
-      `Request failed: ${normalized}`
-    );
-}
-
-/* ============================================================
-   14. BATCH FETCH
-============================================================ */
-
-async function fetchBatch(
-  urls,
-  limit = CONCURRENCY,
-  options = {}
-) {
-  const output =
-    new Array(urls.length);
-
-  let cursor = 0;
-
-  const workers =
-    Array.from(
-      {
-        length:
-          Math.min(
-            limit,
-            urls.length
-          )
-      },
-      async () => {
-        while (true) {
-          const index =
-            cursor++;
-
-          if (
-            index >= urls.length
-          ) {
-            return;
-          }
-
-          try {
-            output[index] = {
-              ok: true,
-              data:
-                await fetchRetry(
-                  urls[index],
-                  options
-                )
-            };
-          } catch (error) {
-            output[index] = {
-              ok: false,
-              error:
-                error.message
-            };
-          }
-        }
-      }
-    );
-
-  await Promise.all(workers);
-
-  return output;
-}
-
-/* ============================================================
-   15. XML/RSS HELPERS
-============================================================ */
-
-function decodeXml(value) {
-  return String(value || '')
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, '$1')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .trim();
-}
-
-function rssTag(item, tag) {
-  const escaped =
-    tag.replace(
-      /[.*+?^${}()|[\]\\]/g,
-      '\\$&'
-    );
-
-  const match =
-    item.match(
-      new RegExp(
-        `<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)</${escaped}>`,
-        'i'
+  const normalized = normalizeText(text);
+
+  return unique(
+    skills
+      .filter(skill =>
+        normalized.includes(
+          normalizeText(skill)
+        )
       )
+      .map(
+        skill =>
+          skill.charAt(0).toUpperCase() +
+          skill.slice(1)
+      )
+  ).slice(0, 15);
+}
+
+function normalizeJob(raw) {
+  const title = stripHTML(raw.title).trim();
+
+  const company =
+    stripHTML(
+      raw.company ||
+      raw.companyName ||
+      raw.employer ||
+      ''
+    ).trim();
+
+  const description =
+    stripHTML(
+      raw.description ||
+      raw.content ||
+      raw.excerpt ||
+      ''
+    ).trim();
+
+  const location =
+    stripHTML(
+      raw.location ||
+      raw.city ||
+      'India'
+    ).trim();
+
+  const url =
+    String(
+      raw.url ||
+      raw.applyUrl ||
+      raw.hostedUrl ||
+      raw.link ||
+      ''
+    ).trim();
+
+  const source =
+    String(raw.source || 'Unknown').trim();
+
+  const publishedAt =
+    parseDate(
+      raw.publishedAt ||
+      raw.postedAt ||
+      raw.createdAt ||
+      raw.updatedAt
     );
 
-  return match
-    ? decodeXml(match[1])
-    : '';
-}
-
-function parseRSS(text, sourceName) {
-  const jobs = [];
-
-  const items =
-    text.match(
-      /<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi
-    ) || [];
-
-  for (const item of items) {
-    const title =
-      cleanText(
-        rssTag(item, 'title')
-      );
-
-    const link =
-      normalizeUrl(
-        rssTag(item, 'link') ||
-        rssTag(item, 'guid')
-      );
-
-    const description =
-      cleanText(
-        rssTag(item, 'description') ||
-        rssTag(item, 'summary') ||
-        rssTag(item, 'content:encoded')
-      );
-
-    const published =
-      rssTag(item, 'pubDate') ||
-      rssTag(item, 'published') ||
-      rssTag(item, 'dc:date');
-
-    const category =
-      cleanText(
-        rssTag(item, 'category')
-      );
-
-    if (!title || !link) {
-      continue;
-    }
-
-    jobs.push({
-      externalId:
-        `${sourceName}-${hashId(link)}`,
-
-      title,
-
-      company:
-        'Various',
-
-      description,
-
-      location:
-        'India',
-
-      url:
-        link,
-
-      source:
-        sourceName,
-
-      category:
-        category || 'General',
-
-      employmentType:
-        '',
-
-      salary:
-        null,
-
-      publishedAt:
-        safeDate(
-          published,
-          new Date()
-        ).toISOString()
-    });
+  if (
+    !title ||
+    !company ||
+    !description ||
+    !url
+  ) {
+    return null;
   }
 
-  return jobs;
+  if (!/^https?:\/\//i.test(url)) {
+    return null;
+  }
+
+  if (
+    BLACKLISTED_DOMAINS.some(
+      domain =>
+        url.toLowerCase().includes(domain)
+    )
+  ) {
+    return null;
+  }
+
+  if (
+    !isIndiaOrRemote(
+      location,
+      `${title} ${description}`
+    )
+  ) {
+    return null;
+  }
+
+  const remote = detectRemote(
+    title,
+    description,
+    location
+  );
+
+  const hybrid = detectHybrid(
+    title,
+    description,
+    location
+  );
+
+  const sourceId =
+    raw.externalId ||
+    raw.id ||
+    url;
+
+  const id = hash(
+    `${source}|${sourceId}|${url}`
+  );
+
+  const slugBase =
+    `${title}-${company}-${id.slice(0, 8)}`;
+
+  return {
+    id,
+    externalId: String(sourceId),
+    title,
+    company,
+    description,
+    location,
+    url,
+    source,
+    category:
+      raw.category ||
+      raw.department ||
+      'General',
+    employmentType:
+      raw.employmentType ||
+      raw.jobType ||
+      'Full-time',
+    salary:
+      raw.salary ||
+      raw.salaryRange ||
+      null,
+    publishedAt:
+      publishedAt ||
+      new Date().toISOString(),
+    remote,
+    hybrid,
+    experienceLevel:
+      detectExperience(title),
+    skills:
+      extractSkills(
+        `${title} ${description}`
+      ),
+    slug:
+      slugify(slugBase),
+    verifiedSource: true,
+    isLive: true,
+    firstSeenAt:
+      new Date().toISOString(),
+    lastSeenAt:
+      new Date().toISOString(),
+    updatedAt:
+      new Date().toISOString()
+  };
 }
 
-/* ============================================================
-   16. SOURCE ADAPTER — ARBEITNOW
-============================================================ */
+// ============================================================
+// SOURCE 1 — ARBEITNOW
+// ============================================================
 
 async function fetchArbeitnow() {
   const jobs = [];
 
-  try {
-    for (
-      let page = 1;
-      page <= ARBEIT_PAGES;
-      page++
-    ) {
+  for (
+    let page = 1;
+    page <= ARBEIT_PAGES;
+    page++
+  ) {
+    try {
       const url =
         `https://www.arbeitnow.com/api/job-board-api?page=${page}`;
 
-      const text =
-        await fetchRetry(url);
-
-      const data =
-        JSON.parse(text);
+      const data = await fetchJSON(url);
 
       const list =
-        Array.isArray(data.data)
+        Array.isArray(data?.data)
           ? data.data
           : [];
 
-      if (!list.length) {
-        break;
-      }
+      if (!list.length) break;
 
       for (const item of list) {
         jobs.push({
           externalId:
-            `arbeit-${item.slug || item.id || hashId(item.title)}`,
-
-          title:
-            item.title,
-
+            `arbeitnow:${item.slug || item.id || hash(item.url)}`,
+          title: item.title,
           company:
             item.company_name ||
-            item.company ||
-            'Unknown',
-
+            item.company,
           description:
             item.description ||
-            item.excerpt ||
-            '',
-
+            item.excerpt,
           location:
             item.location ||
             'Remote',
-
           url:
             item.url ||
-            item.apply_url ||
-            '',
-
-          source:
-            'Arbeitnow',
-
+            item.apply_url,
+          source: 'Arbeitnow',
           category:
             item.tags?.[0] ||
-            'IT',
-
+            'General',
           employmentType:
             item.job_types?.[0] ||
             'Full-time',
-
           salary:
-            item.salary ||
-            null,
-
+            item.salary,
           publishedAt:
             item.created_at ||
-            item.published_at ||
-            nowIso()
+            item.published_at
         });
       }
 
-      if (
-        page % 5 === 0
-      ) {
-        logger.info(
-          'Arbeitnow progress',
-          {
-            page,
-            jobs: jobs.length
-          }
-        );
-      }
+      info('Arbeitnow page complete', {
+        page,
+        jobs: jobs.length
+      });
 
-      await sleep(150);
+      if (list.length < 10) break;
+    } catch (err) {
+      error('Arbeitnow page failed', {
+        page,
+        error: err.message
+      });
+
+      break;
     }
-  } catch (error) {
-    logger.error(
-      'Arbeitnow failed',
-      {
-        error: error.message
-      }
-    );
   }
+
+  metrics.sources.Arbeitnow = {
+    fetched: jobs.length
+  };
 
   return jobs;
 }
 
-/* ============================================================
-   17. SOURCE ADAPTER — LEVER
-============================================================ */
+// ============================================================
+// SOURCE 2 — LEVER
+// ============================================================
 
 async function fetchLever() {
   const jobs = [];
 
-  const urls =
-    LEVER_BOARDS.map(
-      company =>
+  const results = await mapLimit(
+    LEVER_BOARDS,
+    CONCURRENCY,
+    async company => {
+      const url =
         `https://api.lever.co/v0/postings/${encodeURIComponent(
           company.toLowerCase()
-        )}?mode=json`
-    );
+        )}?mode=json`;
 
-  const results =
-    await fetchBatch(
-      urls,
-      5
-    );
+      return {
+        company,
+        data: await fetchJSON(url)
+      };
+    }
+  );
 
-  for (
-    let i = 0;
-    i < results.length;
-    i++
-  ) {
-    const result =
-      results[i];
-
-    const company =
-      LEVER_BOARDS[i];
-
-    if (!result.ok) {
-      logger.warn(
-        `Lever ${company} failed`,
-        {
-          error:
-            result.error
-        }
-      );
-
+  for (const result of results) {
+    if (result?.error) {
+      error('Lever board failed', {
+        error: result.error.message
+      });
       continue;
     }
 
-    try {
-      const data =
-        JSON.parse(
-          result.data
-        );
+    const company = result.company;
 
-      for (const item of data || []) {
-        const location =
+    const list =
+      Array.isArray(result.data)
+        ? result.data
+        : [];
+
+    for (const item of list) {
+      jobs.push({
+        externalId:
+          `lever:${item.id}`,
+        title:
+          item.text ||
+          item.title,
+        company,
+        description:
+          item.description ||
+          item.content ||
+          '',
+        location:
           item.categories?.location ||
-          'India';
-
-        jobs.push({
-          externalId:
-            `lev-${item.id || hashId(item.text + company)}`,
-
-          title:
-            item.text ||
-            item.title ||
-            '',
-
-          company:
-            company
-              .charAt(0)
-              .toUpperCase() +
-            company.slice(1),
-
-          description:
-            cleanText(
-              item.description ||
-              item.content ||
-              ''
-            ),
-
-          location:
-            Array.isArray(location)
-              ? location.join(', ')
-              : location,
-
-          url:
-            item.applyUrl ||
-            item.hostedUrl ||
-            item.url ||
-            '',
-
-          source:
-            'Lever',
-
-          category:
-            item.categories?.team ||
-            'IT',
-
-          employmentType:
-            item.categories?.commitment ||
-            'Full-time',
-
-          salary:
-            null,
-
-          publishedAt:
-            item.createdAt ||
-            item.updatedAt ||
-            item.postedAt ||
-            nowIso()
-        });
-      }
-
-    } catch (error) {
-      logger.warn(
-        `Lever ${company} parse failed`,
-        {
-          error: error.message
-        }
-      );
+          'Remote',
+        url:
+          item.applyUrl ||
+          item.hostedUrl ||
+          '',
+        source: 'Lever',
+        category:
+          item.categories?.team ||
+          'General',
+        employmentType:
+          item.categories?.commitment ||
+          'Full-time',
+        publishedAt:
+          item.createdAt ||
+          item.updatedAt
+      });
     }
   }
+
+  metrics.sources.Lever = {
+    fetched: jobs.length
+  };
 
   return jobs;
 }
 
-/* ============================================================
-   18. SOURCE ADAPTER — GREENHOUSE
-============================================================ */
+// ============================================================
+// SOURCE 3 — GREENHOUSE
+// ============================================================
 
 async function fetchGreenhouse() {
   const jobs = [];
 
-  const urls =
-    GH_BOARDS.map(
-      company =>
+  const results = await mapLimit(
+    GREENHOUSE_BOARDS,
+    CONCURRENCY,
+    async company => {
+      const url =
         `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(
           company.toLowerCase()
-        )}/jobs?content=true`
-    );
+        )}/jobs?content=true`;
 
-  const results =
-    await fetchBatch(
-      urls,
-      5
-    );
+      return {
+        company,
+        data: await fetchJSON(url)
+      };
+    }
+  );
 
-  for (
-    let i = 0;
-    i < results.length;
-    i++
-  ) {
-    const result =
-      results[i];
-
-    const company =
-      GH_BOARDS[i];
-
-    if (!result.ok) {
-      logger.warn(
-        `Greenhouse ${company} failed`,
-        {
-          error:
-            result.error
-        }
-      );
-
+  for (const result of results) {
+    if (result?.error) {
+      error('Greenhouse board failed', {
+        error: result.error.message
+      });
       continue;
     }
 
-    try {
-      const data =
-        JSON.parse(
-          result.data
-        );
+    const company = result.company;
 
-      for (
-        const item of
-        data.jobs || []
-      ) {
-        jobs.push({
-          externalId:
-            `gh-${item.id}`,
+    const list =
+      Array.isArray(result.data?.jobs)
+        ? result.data.jobs
+        : [];
 
-          title:
-            item.title || '',
-
-          company:
-            company
-              .charAt(0)
-              .toUpperCase() +
-            company.slice(1),
-
-          description:
-            cleanText(
-              item.content ||
-              item.description ||
-              ''
-            ),
-
-          location:
-            item.location?.name ||
-            'Remote',
-
-          url:
-            item.absolute_url ||
-            '',
-
-          source:
-            'Greenhouse',
-
-          category:
-            item.departments?.[0]?.name ||
-            'IT',
-
-          employmentType:
-            'Full-time',
-
-          salary:
-            null,
-
-          publishedAt:
-            item.updated_at ||
-            item.created_at ||
-            nowIso()
-        });
-      }
-
-    } catch (error) {
-      logger.warn(
-        `Greenhouse ${company} parse failed`,
-        {
-          error: error.message
-        }
-      );
+    for (const item of list) {
+      jobs.push({
+        externalId:
+          `greenhouse:${item.id}`,
+        title: item.title,
+        company,
+        description:
+          item.content ||
+          item.description ||
+          '',
+        location:
+          item.location?.name ||
+          'Remote',
+        url:
+          item.absolute_url ||
+          '',
+        source: 'Greenhouse',
+        category:
+          item.departments?.[0]?.name ||
+          'General',
+        employmentType:
+          'Full-time',
+        publishedAt:
+          item.updated_at ||
+          item.created_at
+      });
     }
   }
+
+  metrics.sources.Greenhouse = {
+    fetched: jobs.length
+  };
 
   return jobs;
 }
 
-/* ============================================================
-   19. SOURCE ADAPTER — RSS
-============================================================ */
+// ============================================================
+// SOURCE 4 — RSS
+// ============================================================
 
 async function fetchRSS() {
   const jobs = [];
 
   for (const feed of RSS_FEEDS) {
     try {
-      const text =
-        await fetchRetry(feed);
+      const xml =
+        await fetchText(feed);
 
-      jobs.push(
-        ...parseRSS(
-          text,
-          'RSS'
-        )
-      );
-    } catch (error) {
-      logger.warn(
-        'RSS feed failed',
-        {
-          feed,
-          error:
-            error.message
+      const items =
+        parseRSS(xml);
+
+      for (const item of items) {
+        if (!item.title || !item.link) {
+          continue;
         }
-      );
+
+        jobs.push({
+          externalId:
+            `rss:${hash(item.link)}`,
+          title: item.title,
+          company:
+            'Various',
+          description:
+            item.description,
+          location:
+            'India',
+          url:
+            item.link,
+          source:
+            'RSS',
+          category:
+            item.category ||
+            'General',
+          employmentType:
+            'Full-time',
+          publishedAt:
+            item.publishedAt
+        });
+      }
+    } catch (err) {
+      error('RSS feed failed', {
+        feed,
+        error: err.message
+      });
     }
   }
+
+  metrics.sources.RSS = {
+    fetched: jobs.length
+  };
 
   return jobs;
 }
 
-/* ============================================================
-   20. SOURCE ADAPTER — REMOTIVE
-============================================================ */
+// ============================================================
+// SOURCE 5 — REMOTIVE
+// ============================================================
 
 async function fetchRemotive() {
-  try {
-    const text =
-      await fetchRetry(
-        'https://remotive.com/remote-jobs/feed'
-      );
-
-    const parsed =
-      parseRSS(
-        text,
-        'Remotive'
-      );
-
-    return parsed.map(job => ({
-      ...job,
-
-      location:
-        job.location || 'Remote',
-
-      category:
-        'Remote',
-
-      employmentType:
-        job.employmentType ||
-        'Full-time'
-    }));
-  } catch (error) {
-    logger.warn(
-      'Remotive failed',
-      {
-        error:
-          error.message
-      }
-    );
-
-    return [];
-  }
-}
-
-/* ============================================================
-   21. SOURCE ADAPTER — NCS
-============================================================ */
-
-async function fetchNCS() {
   const jobs = [];
 
   try {
-    const url =
-      'https://www.ncs.gov.in/_api/jobs/search?page=1&size=100';
-
-    const text =
-      await fetchRetry(
-        url,
-        {
-          headers: {
-            Accept:
-              'application/json'
-          }
-        }
+    const data =
+      await fetchJSON(
+        'https://remotive.com/api/remote-jobs'
       );
 
-    const data =
-      JSON.parse(text);
-
     const list =
-      data.data ||
-      data.jobs ||
-      data.results ||
-      [];
+      Array.isArray(data?.jobs)
+        ? data.jobs
+        : [];
 
     for (const item of list) {
       jobs.push({
         externalId:
-          `ncs-${item.jobId || item.id || hashId(item.title)}`,
-
+          `remotive:${item.id}`,
         title:
-          item.title ||
-          item.jobTitle ||
-          '',
-
+          item.title,
         company:
-          item.organization ||
-          item.employer ||
-          'Government of India',
-
+          item.company_name ||
+          item.company ||
+          'Unknown',
         description:
           item.description ||
-          item.jobDescription ||
-          'Government position in India',
-
+          '',
         location:
-          [
-            item.city,
-            item.state,
-            'India'
-          ]
-            .filter(Boolean)
-            .join(', '),
-
+          item.candidate_required_location ||
+          'Remote',
         url:
-          item.applyUrl ||
           item.url ||
-          (
-            item.jobId || item.id
-              ? `https://www.ncs.gov.in/job-posts/${item.jobId || item.id}`
-              : ''
-          ),
-
+          '',
         source:
-          'NCS',
-
+          'Remotive',
         category:
-          item.sector ||
-          item.industry ||
-          'Government',
-
+          item.category ||
+          'Remote',
         employmentType:
-          item.employmentType ||
-          item.jobType ||
+          item.job_type ||
           'Full-time',
-
         salary:
-          item.salary ||
-          null,
-
+          item.salary,
         publishedAt:
-          item.postedDate ||
-          item.publishedDate ||
-          item.createdAt ||
-          nowIso()
+          item.publication_date ||
+          item.created_at
       });
     }
-  } catch (error) {
-    logger.warn(
-      'NCS failed',
-      {
-        error:
-          error.message
+  } catch (err) {
+    /*
+     * RSS fallback is still real-source data.
+     */
+    try {
+      const xml =
+        await fetchText(
+          'https://remotive.com/remote-jobs/feed'
+        );
+
+      for (const item of parseRSS(xml)) {
+        if (!item.title || !item.link) {
+          continue;
+        }
+
+        jobs.push({
+          externalId:
+            `remotive-rss:${hash(item.link)}`,
+          title:
+            item.title,
+          company:
+            'Remote Company',
+          description:
+            item.description,
+          location:
+            'Remote',
+          url:
+            item.link,
+          source:
+            'Remotive RSS',
+          category:
+            'Remote',
+          employmentType:
+            'Full-time',
+          publishedAt:
+            item.publishedAt
+        });
       }
-    );
+    } catch (rssErr) {
+      error('Remotive failed', {
+        error: err.message,
+        rssError: rssErr.message
+      });
+    }
   }
+
+  metrics.sources.Remotive = {
+    fetched: jobs.length
+  };
 
   return jobs;
 }
 
-/* ============================================================
-   22. SOURCE ADAPTER — INDIAN API
-============================================================ */
+// ============================================================
+// SOURCE 6 — NCS
+// ============================================================
+
+async function fetchNCS() {
+  const jobs = [];
+
+  /*
+   * NCS endpoints can change.
+   * We intentionally do not fabricate data if the
+   * public endpoint is unavailable.
+   */
+
+  const endpoints = [
+    'https://www.ncs.gov.in/_api/jobs/search?page=1&size=100'
+  ];
+
+  for (const url of endpoints) {
+    try {
+      const data =
+        await fetchJSON(url, {
+          headers: {
+            Accept:
+              'application/json'
+          }
+        });
+
+      const list =
+        data?.data ||
+        data?.jobs ||
+        data?.results ||
+        [];
+
+      if (!Array.isArray(list)) {
+        continue;
+      }
+
+      for (const item of list) {
+        const id =
+          item.jobId ||
+          item.id;
+
+        const title =
+          item.title ||
+          item.jobTitle;
+
+        if (!id || !title) {
+          continue;
+        }
+
+        jobs.push({
+          externalId:
+            `ncs:${id}`,
+          title,
+          company:
+            item.organization ||
+            item.employer ||
+            'NCS',
+          description:
+            item.description ||
+            item.jobDescription ||
+            '',
+          location:
+            [
+              item.city,
+              item.state,
+              'India'
+            ]
+              .filter(Boolean)
+              .join(', '),
+          url:
+            item.applyUrl ||
+            item.url ||
+            '',
+          source:
+            'NCS',
+          category:
+            item.sector ||
+            item.industry ||
+            'Government',
+          employmentType:
+            item.employmentType ||
+            item.jobType ||
+            'Full-time',
+          salary:
+            item.salary,
+          publishedAt:
+            item.postedDate ||
+            item.publishedDate ||
+            item.createdAt
+        });
+      }
+
+      break;
+    } catch (err) {
+      error('NCS endpoint failed', {
+        url,
+        error: err.message
+      });
+    }
+  }
+
+  metrics.sources.NCS = {
+    fetched: jobs.length
+  };
+
+  return jobs;
+}
+
+// ============================================================
+// SOURCE 7 — OPTIONAL INDIAN API
+// ============================================================
 
 async function fetchIndianAPI() {
   if (!INDIAN_API_KEY) {
-    logger.info(
-      'IndianAPI skipped: no API key'
-    );
+    metrics.sources.IndianAPI = {
+      skipped: true,
+      reason: 'API key not configured'
+    };
 
     return [];
   }
 
+  const jobs = [];
+
   try {
-    const text =
-      await fetchRetry(
+    const data =
+      await fetchJSON(
         'https://indianapi.in/api/v2/job/search',
         {
           headers: {
@@ -2153,330 +1415,362 @@ async function fetchIndianAPI() {
         }
       );
 
-    const data =
-      JSON.parse(text);
-
     const list =
-      data.results ||
-      data.jobs ||
-      data.data ||
+      data?.results ||
+      data?.jobs ||
+      data?.data ||
       [];
 
-    return list.map(item => ({
-      externalId:
-        `ind-${item.id || item.job_id || hashId(item.title)}`,
-
-      title:
-        item.title ||
-        item.job_title ||
-        '',
-
-      company:
-        item.company ||
-        item.company_name ||
-        item.employer ||
-        'Unknown',
-
-      description:
-        item.description ||
-        item.job_description ||
-        '',
-
-      location:
-        item.location ||
-        item.city ||
-        'India',
-
-      url:
-        item.url ||
-        item.apply_url ||
-        item.link ||
-        '',
-
-      source:
-        'IndianAPI',
-
-      category:
-        item.category ||
-        item.industry ||
-        'General',
-
-      employmentType:
-        item.job_type ||
-        item.employment_type ||
-        'Full-time',
-
-      salary:
-        item.salary ||
-        item.salary_range ||
-        null,
-
-      publishedAt:
-        item.posted_at ||
-        item.created_at ||
-        item.date ||
-        nowIso()
-    }));
-  } catch (error) {
-    logger.warn(
-      'IndianAPI failed',
-      {
-        error:
-          error.message
+    if (Array.isArray(list)) {
+      for (const item of list) {
+        jobs.push({
+          externalId:
+            `indianapi:${item.id || item.job_id}`,
+          title:
+            item.title ||
+            item.job_title,
+          company:
+            item.company ||
+            item.company_name ||
+            item.employer,
+          description:
+            item.description ||
+            item.job_description ||
+            '',
+          location:
+            item.location ||
+            item.city ||
+            'India',
+          url:
+            item.url ||
+            item.apply_url ||
+            item.link ||
+            '',
+          source:
+            'IndianAPI',
+          category:
+            item.category ||
+            item.industry ||
+            'General',
+          employmentType:
+            item.job_type ||
+            item.employment_type ||
+            'Full-time',
+          salary:
+            item.salary ||
+            item.salary_range,
+          publishedAt:
+            item.posted_at ||
+            item.created_at ||
+            item.date
+        });
       }
-    );
-
-    return [];
+    }
+  } catch (err) {
+    error('IndianAPI failed', {
+      error: err.message
+    });
   }
+
+  metrics.sources.IndianAPI = {
+    fetched: jobs.length
+  };
+
+  return jobs;
 }
 
-/* ============================================================
-   23. SOURCE ADAPTER — JOBDATA API
-============================================================ */
+// ============================================================
+// SOURCE 8 — OPTIONAL JOBDATAAPI
+// ============================================================
 
 async function fetchJobDataAPI() {
-  if (!JOBDATA_KEY) {
-    logger.info(
-      'JobDataAPI skipped: no API key'
-    );
+  if (!JOBDATA_API_KEY) {
+    metrics.sources.JobDataAPI = {
+      skipped: true,
+      reason: 'API key not configured'
+    };
 
     return [];
   }
 
+  const jobs = [];
+
   try {
-    const text =
-      await fetchRetry(
+    const data =
+      await fetchJSON(
         'https://jobdataapi.com/api/jobs?country_code=IN&limit=100',
         {
           headers: {
             Authorization:
-              `Bearer ${JOBDATA_KEY}`
+              `Bearer ${JOBDATA_API_KEY}`
           }
         }
       );
 
-    const data =
-      JSON.parse(text);
-
     const list =
-      data.results ||
-      data.data ||
+      data?.results ||
+      data?.data ||
       [];
 
-    return list.map(item => ({
-      externalId:
-        `jd-${item.id || item.job_id || hashId(item.title)}`,
-
-      title:
-        item.title || '',
-
-      company:
-        item.company ||
-        item.company_name ||
-        'Unknown',
-
-      description:
-        item.description ||
-        item.job_description ||
-        '',
-
-      location:
-        item.location ||
-        item.city ||
-        'India',
-
-      url:
-        item.url ||
-        item.apply_url ||
-        '',
-
-      source:
-        'JobDataAPI',
-
-      category:
-        item.category ||
-        item.industry ||
-        'General',
-
-      employmentType:
-        item.employment_type ||
-        item.job_type ||
-        'Full-time',
-
-      salary:
-        item.salary ||
-        item.salary_range ||
-        null,
-
-      publishedAt:
-        item.posted_at ||
-        item.date ||
-        nowIso()
-    }));
-  } catch (error) {
-    logger.warn(
-      'JobDataAPI failed',
-      {
-        error:
-          error.message
+    if (Array.isArray(list)) {
+      for (const item of list) {
+        jobs.push({
+          externalId:
+            `jobdata:${item.id || item.job_id}`,
+          title:
+            item.title,
+          company:
+            item.company ||
+            item.company_name,
+          description:
+            item.description ||
+            item.job_description ||
+            '',
+          location:
+            item.location ||
+            item.city ||
+            'India',
+          url:
+            item.url ||
+            item.apply_url ||
+            '',
+          source:
+            'JobDataAPI',
+          category:
+            item.category ||
+            item.industry ||
+            'General',
+          employmentType:
+            item.employment_type ||
+            item.job_type ||
+            'Full-time',
+          salary:
+            item.salary ||
+            item.salary_range,
+          publishedAt:
+            item.posted_at ||
+            item.date
+        });
       }
+    }
+  } catch (err) {
+    error('JobDataAPI failed', {
+      error: err.message
+    });
+  }
+
+  metrics.sources.JobDataAPI = {
+    fetched: jobs.length
+  };
+
+  return jobs;
+}
+
+// ============================================================
+// DEDUPLICATION
+// ============================================================
+
+function normalizedURL(url) {
+  try {
+    const u = new URL(url);
+
+    u.hash = '';
+
+    [
+      'utm_source',
+      'utm_medium',
+      'utm_campaign',
+      'utm_term',
+      'utm_content',
+      'ref',
+      'source'
+    ].forEach(param =>
+      u.searchParams.delete(param)
     );
 
-    return [];
+    return u.toString().replace(/\/$/, '');
+  } catch {
+    return String(url || '')
+      .trim()
+      .toLowerCase();
   }
 }
 
-/* ============================================================
-   24. NORMALIZATION
-============================================================ */
-
-function normalizeJob(raw) {
-  const title =
-    cleanText(
-      raw.title
-    );
-
-  const company =
-    cleanText(
-      raw.company ||
-      raw.employer ||
-      'Unknown'
-    );
-
-  const description =
-    cleanText(
-      raw.description
-    );
-
-  const location =
-    cleanText(
-      raw.location ||
-      'India'
-    ) || 'India';
-
-  const url =
-    normalizeUrl(
-      raw.url
-    );
-
-  const published =
-    safeDate(
-      raw.publishedAt,
-      new Date()
-    );
-
-  const id =
-    hashId(
-      raw.externalId ||
-      url ||
-      `${title}|${company}|${location}`
-    );
-
-  const fullText =
-    `${title} ${description}`;
-
-  const remote =
-    detectRemote(fullText);
-
-  const salary =
-    parseSalary(
-      raw.salary
-    );
-
-  const slugBase =
-    slugify(
-      `${title}-${company}`
-    );
-
-  return {
-    id,
-
-    externalId:
-      raw.externalId ||
-      id,
-
-    title,
-
-    company,
-
-    description,
-
-    location,
-
-    url,
-
-    source:
-      raw.source ||
-      'Unknown',
-
-    category:
-      raw.category ||
-      detectCategory(
-        title,
-        description
-      ),
-
-    employmentType:
-      raw.employmentType ||
-      detectEmploymentType(
-        fullText
-      ),
-
-    salary:
-      raw.salary ||
-      null,
-
-    salaryRange:
-      salary,
-
-    publishedAt:
-      published.toISOString(),
-
-    updatedAt:
-      nowIso(),
-
-    verifiedSource:
-      true,
-
-    isLive:
-      true,
-
-    skills:
-      extractSkills(
-        fullText
-      ),
-
-    experienceLevel:
-      detectExperience(
-        title,
-        description
-      ),
-
-    remote:
-      remote.remote,
-
-    hybrid:
-      remote.hybrid,
-
-    slug:
-      slugBase,
-
-    lastSeenAt:
-      nowIso(),
-
-    sourceDomain:
-      domainOf(url)
-  };
+function fingerprint(job) {
+  return [
+    normalizeText(job.title),
+    normalizeText(job.company),
+    normalizeText(job.location)
+  ].join('|');
 }
 
-/* ============================================================
-   25. VALIDATION
-============================================================ */
+function similarity(a, b) {
+  const A =
+    new Set(
+      normalizeText(a)
+        .split(' ')
+        .filter(x => x.length > 2)
+    );
 
-function isValid(job) {
+  const B =
+    new Set(
+      normalizeText(b)
+        .split(' ')
+        .filter(x => x.length > 2)
+    );
+
+  if (!A.size || !B.size) {
+    return 0;
+  }
+
+  let common = 0;
+
+  for (const word of A) {
+    if (B.has(word)) {
+      common++;
+    }
+  }
+
+  return common /
+    Math.max(A.size, B.size);
+}
+
+function deduplicate(jobs) {
+  const byURL = new Map();
+  const byFingerprint = new Map();
+
+  const output = [];
+  let duplicates = 0;
+
+  const sorted =
+    [...jobs].sort(
+      (a, b) =>
+        new Date(b.publishedAt) -
+        new Date(a.publishedAt)
+    );
+
+  for (const job of sorted) {
+    const urlKey =
+      normalizedURL(job.url);
+
+    if (byURL.has(urlKey)) {
+      duplicates++;
+      mergeJob(
+        byURL.get(urlKey),
+        job
+      );
+      continue;
+    }
+
+    const fp =
+      fingerprint(job);
+
+    let duplicate = null;
+
+    for (const [
+      existingFP,
+      existingJob
+    ] of byFingerprint) {
+      if (
+        existingFP === fp ||
+        similarity(
+          existingFP,
+          fp
+        ) >= 0.9
+      ) {
+        duplicate = existingJob;
+        break;
+      }
+    }
+
+    if (duplicate) {
+      duplicates++;
+
+      mergeJob(
+        duplicate,
+        job
+      );
+
+      continue;
+    }
+
+    byURL.set(
+      urlKey,
+      job
+    );
+
+    byFingerprint.set(
+      fp,
+      job
+    );
+
+    output.push(job);
+  }
+
+  metrics.duplicateJobs =
+    duplicates;
+
+  return output;
+}
+
+function mergeJob(target, source) {
+  target.skills =
+    unique([
+      ...(target.skills || []),
+      ...(source.skills || [])
+    ]).slice(0, 15);
+
+  if (
+    source.description &&
+    source.description.length >
+      target.description.length
+  ) {
+    target.description =
+      source.description;
+  }
+
+  if (
+    !target.salary &&
+    source.salary
+  ) {
+    target.salary =
+      source.salary;
+  }
+
+  target.lastSeenAt =
+    new Date().toISOString();
+
+  target.updatedAt =
+    new Date().toISOString();
+}
+
+// ============================================================
+// LIVE / EXPIRY FILTER
+// ============================================================
+
+function isFresh(job) {
+  const date =
+    new Date(job.publishedAt);
+
+  if (
+    Number.isNaN(date.getTime())
+  ) {
+    return false;
+  }
+
+  const age =
+    Date.now() -
+    date.getTime();
+
+  return (
+    age <=
+    RETENTION_DAYS *
+      86400000
+  );
+}
+
+function validateJob(job) {
   if (!job) return false;
-
-  if (!job.id) return false;
 
   if (
     !job.title ||
@@ -2493,41 +1787,22 @@ function isValid(job) {
   }
 
   if (
+    !job.description ||
+    job.description.length < 20
+  ) {
+    return false;
+  }
+
+  if (
     !job.url ||
-    !/^https?:\/\//i.test(
-      job.url
-    )
+    !/^https?:\/\//i.test(job.url)
   ) {
     return false;
   }
 
   if (
-    job.description.length <
-    MIN_DESCRIPTION
-  ) {
-    return false;
-  }
-
-  if (
-    BLACKLIST.length &&
-    BLACKLIST.some(
-      domain =>
-        job.url
-          .toLowerCase()
-          .includes(domain)
-    )
-  ) {
-    return false;
-  }
-
-  const indian =
-    isIndianLocation(
-      job.location
-    );
-
-  if (
-    !indian &&
-    !(ALLOW_REMOTE && job.remote)
+    !job.publishedAt ||
+    !isFresh(job)
   ) {
     return false;
   }
@@ -2535,359 +1810,45 @@ function isValid(job) {
   return true;
 }
 
-/* ============================================================
-   26. DUPLICATE DETECTION
-============================================================ */
-
-function fingerprint(job) {
-  return [
-    job.title,
-    job.company,
-    job.location
-  ]
-    .join('|')
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function tokenSet(text) {
-  return new Set(
-    String(text || '')
-      .toLowerCase()
-      .split(/\W+/)
-      .filter(
-        word => word.length > 2
-      )
-  );
-}
-
-function similarity(a, b) {
-  const A =
-    tokenSet(a);
-
-  const B =
-    tokenSet(b);
-
-  if (!A.size || !B.size) {
-    return 0;
-  }
-
-  let intersection = 0;
-
-  for (const token of A) {
-    if (B.has(token)) {
-      intersection++;
-    }
-  }
-
-  return (
-    intersection /
-    Math.max(
-      A.size,
-      B.size
-    )
-  );
-}
-
-function mergeInto(target, source) {
-  target.skills =
-    unique([
-      ...(target.skills || []),
-      ...(source.skills || [])
-    ]).slice(0, 15);
-
-  if (
-    source.description &&
-    source.description.length >
-    (target.description || '').length
-  ) {
-    target.description =
-      source.description;
-  }
-
-  if (
-    !target.salaryRange &&
-    source.salaryRange
-  ) {
-    target.salaryRange =
-      source.salaryRange;
-  }
-
-  if (
-    source.salary &&
-    !target.salary
-  ) {
-    target.salary =
-      source.salary;
-  }
-
-  if (
-    source.remote
-  ) {
-    target.remote = true;
-  }
-
-  if (
-    source.hybrid
-  ) {
-    target.hybrid = true;
-  }
-
-  if (
-    source.publishedAt &&
-    (
-      !target.publishedAt ||
-      source.publishedAt >
-      target.publishedAt
-    )
-  ) {
-    target.publishedAt =
-      source.publishedAt;
-  }
-
-  target.updatedAt =
-    nowIso();
-
-  target.lastSeenAt =
-    nowIso();
-
-  return target;
-}
-
-function dedupe(list) {
-  const byUrl =
-    new Map();
-
-  const byFingerprint =
-    new Map();
-
-  const output = [];
-
-  const sorted =
-    [...list].sort(
-      (a, b) =>
-        b.publishedAt.localeCompare(
-          a.publishedAt
-        )
-    );
-
-  for (const job of sorted) {
-    const url =
-      normalizeUrl(job.url);
-
-    if (
-      url &&
-      byUrl.has(url)
-    ) {
-      mergeInto(
-        byUrl.get(url),
-        job
-      );
-
-      metrics.duplicateJobs++;
-
-      continue;
-    }
-
-    const fp =
-      fingerprint(job);
-
-    let duplicate =
-      byFingerprint.get(fp);
-
-    if (!duplicate) {
-      for (
-        const [
-          existingFp,
-          existingJob
-        ] of byFingerprint
-      ) {
-        if (
-          similarity(
-            existingFp,
-            fp
-          ) >= 0.88
-        ) {
-          duplicate =
-            existingJob;
-
-          break;
-        }
-      }
-    }
-
-    if (duplicate) {
-      mergeInto(
-        duplicate,
-        job
-      );
-
-      metrics.duplicateJobs++;
-
-      continue;
-    }
-
-    if (url) {
-      byUrl.set(
-        url,
-        job
-      );
-    }
-
-    byFingerprint.set(
-      fp,
-      job
-    );
-
-    output.push(job);
-  }
-
-  return output;
-}
-
-/* ============================================================
-   27. PREVIOUS DATA
-============================================================ */
-
-async function loadPrevious() {
-  try {
-    const text =
-      await fs.readFile(
-        DATA_FILE,
-        'utf8'
-      );
-
-    const data =
-      JSON.parse(text);
-
-    if (
-      Array.isArray(
-        data.jobs
-      )
-    ) {
-      return data.jobs;
-    }
-  } catch (_) {}
-
-  return [];
-}
-
-function mergePrevious(
-  fresh,
-  previous
-) {
-  const map =
-    new Map();
-
-  const now =
-    nowIso();
-
-  for (const job of previous) {
-    if (!job?.id) continue;
-
-    job.lastSeenAt =
-      job.lastSeenAt ||
-      now;
-
-    map.set(
-      job.id,
-      job
-    );
-  }
-
-  for (const job of fresh) {
-    job.lastSeenAt =
-      now;
-
-    if (
-      map.has(job.id)
-    ) {
-      mergeInto(
-        map.get(job.id),
-        job
-      );
-    } else {
-      map.set(
-        job.id,
-        job
-      );
-    }
-  }
-
-  return dedupe(
-    [...map.values()]
-  );
-}
-
-/* ============================================================
-   28. EXPIRY
-============================================================ */
-
-function removeExpired(jobs) {
-  const cutoff =
-    Date.now() -
-    RETENTION_DAYS *
-    86400000;
-
-  return jobs.filter(
-    job => {
-      const published =
-        safeDate(
-          job.publishedAt,
-          new Date(0)
-        ).getTime();
-
-      return (
-        published >= cutoff
-      );
-    }
-  );
-}
-
-/* ============================================================
-   29. JOB SCORING
-============================================================ */
+// ============================================================
+// SCORING
+// ============================================================
 
 function scoreJob(job) {
   let score = 0;
-
-  const published =
-    safeDate(
-      job.publishedAt,
-      new Date()
-    );
 
   const ageDays =
     Math.max(
       0,
       (
         Date.now() -
-        published.getTime()
-      ) / 86400000
+        new Date(
+          job.publishedAt
+        ).getTime()
+      ) /
+        86400000
     );
 
-  score +=
-    Math.max(
-      0,
-      50 -
-      ageDays * 2
-    );
+  score += Math.max(
+    0,
+    45 -
+      ageDays * 1.8
+  );
 
   score += Math.min(
     15,
-    (job.description || '').length /
-    80
+    (job.skills?.length || 0) *
+      1.2
   );
 
   score += Math.min(
-    12,
-    (job.skills || []).length *
-    1.5
+    10,
+    job.description.length /
+      100
   );
 
   if (job.remote) {
-    score += 5;
+    score += 6;
   }
 
   if (job.hybrid) {
@@ -2895,31 +1856,23 @@ function scoreJob(job) {
   }
 
   if (
-    job.salaryRange &&
-    job.salaryRange.min
+    job.salary ||
+    job.salaryRange
   ) {
-    score += 6;
-  }
-
-  if (
-    job.company &&
-    ![
-      'Unknown',
-      'Various',
-      'RSS'
-    ].includes(job.company)
-  ) {
-    score += 4;
-  }
-
-  if (job.verifiedSource) {
     score += 5;
   }
 
   if (
-    job.sourceDomain
+    job.company &&
+    job.company !== 'Various'
   ) {
-    score += 2;
+    score += 5;
+  }
+
+  if (
+    job.verifiedSource
+  ) {
+    score += 10;
   }
 
   return Math.round(
@@ -2930,7 +1883,7 @@ function scoreJob(job) {
   );
 }
 
-function scoreSort(jobs) {
+function rankJobs(jobs) {
   for (const job of jobs) {
     job.score =
       scoreJob(job);
@@ -2938,636 +1891,316 @@ function scoreSort(jobs) {
 
   jobs.sort(
     (a, b) =>
-      (b.score - a.score) ||
-      (
-        b.publishedAt ||
-        ''
-      ).localeCompare(
-        a.publishedAt ||
-        ''
-      )
+      b.score -
+      a.score ||
+      new Date(b.publishedAt) -
+      new Date(a.publishedAt)
   );
 
   return jobs;
 }
 
-/* ============================================================
-   30. SAFE FILE WRITER
-============================================================ */
+// ============================================================
+// PREVIOUS DATA
+// ============================================================
 
-async function atomicWrite(
-  file,
-  data,
-  json = false
-) {
-  await fs.mkdir(
-    path.dirname(file),
-    {
-      recursive: true
-    }
-  );
-
-  const temp =
-    `${file}.${BUILD_ID}.tmp`;
-
-  const content =
-    json
-      ? JSON.stringify(
-          data,
-          null,
-          2
-        )
-      : String(data);
-
-  await fs.writeFile(
-    temp,
-    content,
-    'utf8'
-  );
-
-  if (json) {
-    JSON.parse(
-      await fs.readFile(
-        temp,
-        'utf8'
-      )
+async function loadPreviousJobs() {
+  const data =
+    await readJSON(
+      path.join(
+        PUBLIC,
+        'jobs.json'
+      ),
+      null
     );
+
+  if (
+    Array.isArray(
+      data?.jobs
+    )
+  ) {
+    return data.jobs;
   }
 
-  await fs.rename(
-    temp,
-    file
-  );
+  return [];
 }
 
-/* ============================================================
-   31. SEO JOB PAGE
-============================================================ */
+// ============================================================
+// JOB PAGE
+// ============================================================
 
-function jobPageTemplate(job) {
-  const url =
+function createJobPage(job) {
+  const canonical =
     `${SITE_URL}/job/${job.slug}/`;
 
   const title =
-    `${job.title} at ${job.company} in ${job.location} – Apply Now | GOO JOBS`;
+    `${job.title} at ${job.company} in ${job.location} | GOO JOBS`;
 
   const description =
-    cleanText(
+    stripHTML(
       job.description
-    ).substring(
-      0,
-      155
-    );
+    ).slice(0, 155);
 
   const datePosted =
-    safeDate(
-      job.publishedAt,
-      new Date()
+    new Date(
+      job.publishedAt
     ).toISOString();
 
   const validThrough =
     new Date(
-      safeDate(
-        job.publishedAt,
-        new Date()
+      new Date(
+        job.publishedAt
       ).getTime() +
-      RETENTION_DAYS *
-      86400000
+        RETENTION_DAYS *
+          86400000
     ).toISOString();
 
-  const ld = {
+  const schema = {
     '@context':
       'https://schema.org',
-
     '@type':
       'JobPosting',
-
     title:
       job.title,
-
     description:
       job.description,
-
     datePosted,
-
     validThrough,
-
     employmentType:
-      normalizeEmploymentType(
-        job.employmentType
-      ),
-
+      job.employmentType ||
+      'FULL_TIME',
     hiringOrganization: {
       '@type':
         'Organization',
-
       name:
-        job.company,
-
-      sameAs:
-        job.url
+        job.company
     },
-
     jobLocation: {
       '@type':
         'Place',
-
       address: {
         '@type':
           'PostalAddress',
-
         addressLocality:
           job.location,
-
         addressCountry:
           'IN'
       }
     },
-
-    url,
-
-    directApply:
-      false,
-
+    url:
+      canonical,
     sameAs: [
       job.url
     ]
   };
 
-  if (
-    job.salaryRange &&
-    job.salaryRange.min
-  ) {
-    ld.baseSalary = {
-      '@type':
-        'MonetaryAmount',
-
-      currency:
-        job.salaryRange.currency ||
-        'INR',
-
-      value: {
-        '@type':
-          'QuantitativeValue',
-
-        minValue:
-          job.salaryRange.min,
-
-        maxValue:
-          job.salaryRange.max,
-
-        unitText:
-          'YEAR'
-      }
-    };
-  }
-
-  if (
-    job.skills?.length
-  ) {
-    ld.skills =
-      job.skills;
-  }
-
   const skills =
     (job.skills || [])
       .map(
         skill =>
-          `<span class="skill">${esc(skill)}</span>`
+          `<span class="skill">${escapeHTML(
+            skill
+          )}</span>`
       )
       .join('');
 
-  const remoteBadge =
+  const remote =
     job.remote
-      ? '<span class="badge remote">🌐 Remote</span>'
+      ? `<span class="badge remote">Remote</span>`
       : '';
 
-  const hybridBadge =
+  const hybrid =
     job.hybrid
-      ? '<span class="badge hybrid">🔀 Hybrid</span>'
+      ? `<span class="badge hybrid">Hybrid</span>`
       : '';
-
-  const salary =
-    job.salaryRange?.min
-      ? `₹${Math.round(job.salaryRange.min).toLocaleString('en-IN')} - ₹${Math.round(job.salaryRange.max).toLocaleString('en-IN')} / year`
-      : (
-          job.salary ||
-          'Not Disclosed'
-        );
-
-  const descriptionHtml =
-    (job.description ||
-      'No description available.')
-      .split(/\n+/)
-      .map(
-        paragraph =>
-          `<p>${esc(paragraph)}</p>`
-      )
-      .join('');
 
   return `<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="index,follow,max-image-preview:large">
-<meta name="theme-color" content="#070b14">
+<meta charset="utf-8">
+<meta name="viewport"
+content="width=device-width,initial-scale=1">
+<meta name="robots"
+content="index,follow">
+<title>${escapeHTML(title)}</title>
+<meta name="description"
+content="${escapeHTML(description)}">
+<link rel="canonical"
+href="${escapeHTML(canonical)}">
 
-<title>${esc(title)}</title>
+<meta property="og:type"
+content="article">
+<meta property="og:title"
+content="${escapeHTML(title)}">
+<meta property="og:description"
+content="${escapeHTML(description)}">
+<meta property="og:url"
+content="${escapeHTML(canonical)}">
 
-<meta
-  name="description"
-  content="${esc(
-    `Apply for ${job.title} at ${job.company} in ${job.location}. ${description}`
-  )}"
->
-
-<link
-  rel="canonical"
-  href="${esc(url)}"
->
-
-<meta
-  property="og:type"
-  content="website"
->
-
-<meta
-  property="og:title"
-  content="${esc(title)}"
->
-
-<meta
-  property="og:description"
-  content="${esc(description)}"
->
-
-<meta
-  property="og:url"
-  content="${esc(url)}"
->
-
-<meta
-  property="og:image"
-  content="${SITE_URL}/og.svg"
->
-
-<meta
-  name="twitter:card"
-  content="summary_large_image"
->
-
-<script type="application/ld+json">
-${JSON.stringify(ld)}
-</script>
+<script type="application/ld+json">${JSON.stringify(schema)}</script>
 
 <style>
-:root{
-  --bg:#070b14;
-  --panel:#0d1424;
-  --panel2:#111b2f;
-  --line:#1d2a43;
-  --text:#eef4ff;
-  --muted:#91a0bb;
-  --brand:#38bdf8;
-  --brand2:#22d3ee;
-  --green:#34d399;
-  --purple:#a78bfa;
-  --danger:#fb7185;
-  --radius:22px;
-  --shadow:0 20px 60px rgba(0,0,0,.38);
-}
-
-*{
-  box-sizing:border-box;
-}
-
-html{
-  scroll-behavior:smooth;
-}
-
+*{box-sizing:border-box}
 body{
-  margin:0;
-  background:
-    radial-gradient(
-      circle at top right,
-      rgba(56,189,248,.08),
-      transparent 35%
-    ),
-    var(--bg);
-  color:var(--text);
-  font-family:
-    Inter,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
-  line-height:1.65;
+margin:0;
+background:#080b12;
+color:#edf2ff;
+font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+line-height:1.65
 }
-
-a{
-  color:inherit;
-  text-decoration:none;
-}
-
 .container{
-  width:min(900px,calc(100% - 30px));
-  margin:auto;
+width:min(900px,calc(100% - 30px));
+margin:auto;
+padding:25px 0 60px
 }
-
-.header{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:15px;
-  padding:22px 0;
-  border-bottom:1px solid var(--line);
+header{
+display:flex;
+justify-content:space-between;
+align-items:center;
+border-bottom:1px solid #20283a;
+padding-bottom:18px;
+margin-bottom:28px
 }
-
 .logo{
-  font-size:19px;
-  font-weight:900;
-  letter-spacing:.4px;
+font-weight:900;
+font-size:20px;
+color:#46d9ff
 }
-
-.logo span{
-  color:var(--brand);
+nav a{
+color:#9ba8bf;
+text-decoration:none;
+margin-left:15px;
+font-size:14px
 }
-
-.nav{
-  display:flex;
-  gap:16px;
-  flex-wrap:wrap;
-}
-
-.nav a{
-  color:var(--muted);
-  font-size:13px;
-}
-
-.nav a:hover{
-  color:var(--text);
-}
-
-.hero{
-  padding:38px 0 20px;
-}
-
-.source-row{
-  display:flex;
-  flex-wrap:wrap;
-  gap:7px;
-  margin-bottom:16px;
-}
-
-.badge{
-  display:inline-flex;
-  align-items:center;
-  border:1px solid var(--line);
-  background:#0b1322;
-  color:var(--muted);
-  padding:5px 10px;
-  border-radius:999px;
-  font-size:12px;
-}
-
-.badge.remote{
-  color:var(--green);
-  border-color:rgba(52,211,153,.28);
-}
-
-.badge.hybrid{
-  color:var(--purple);
-  border-color:rgba(167,139,250,.28);
-}
-
 h1{
-  font-size:clamp(27px,5vw,42px);
-  line-height:1.15;
-  margin:0 0 20px;
-  letter-spacing:-.8px;
+font-size:clamp(26px,5vw,42px);
+line-height:1.2;
+margin:12px 0
 }
-
 .meta{
-  display:flex;
-  flex-wrap:wrap;
-  gap:8px;
+display:flex;
+gap:8px;
+flex-wrap:wrap;
+margin:15px 0 25px
 }
-
-.meta-item{
-  padding:8px 12px;
-  border:1px solid var(--line);
-  border-radius:999px;
-  background:#0b1322;
-  color:var(--muted);
-  font-size:13px;
+.badge,.pill,.skill{
+display:inline-block;
+border:1px solid #263149;
+background:#101827;
+border-radius:999px;
+padding:5px 11px;
+font-size:12px;
+color:#aeb9ce
 }
-
+.remote{color:#54e6a2}
+.hybrid{color:#d3a8ff}
 .card{
-  background:
-    linear-gradient(
-      145deg,
-      rgba(255,255,255,.025),
-      transparent
-    ),
-    var(--panel);
-  border:1px solid var(--line);
-  border-radius:var(--radius);
-  padding:26px;
-  margin:18px 0;
-  box-shadow:var(--shadow);
+background:#101622;
+border:1px solid #202a40;
+border-radius:20px;
+padding:25px
 }
-
 .card h2{
-  margin:0 0 15px;
-  font-size:19px;
+font-size:19px
 }
-
-.description p{
-  color:var(--muted);
-  margin:0 0 13px;
+.description{
+color:#aeb9ce;
+white-space:normal
 }
-
 .skills{
-  display:flex;
-  flex-wrap:wrap;
-  gap:7px;
-  margin-top:18px;
+margin-top:20px;
+display:flex;
+gap:7px;
+flex-wrap:wrap
 }
-
 .skill{
-  padding:6px 10px;
-  border:1px solid var(--line);
-  background:#0a1322;
-  color:#aab8d0;
-  border-radius:999px;
-  font-size:12px;
+color:#8ddfff
 }
-
 .apply{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  width:100%;
-  margin-top:25px;
-  padding:15px 20px;
-  border-radius:15px;
-  background:
-    linear-gradient(
-      135deg,
-      var(--brand2),
-      var(--brand)
-    );
-  color:#03121c;
-  font-weight:900;
-  transition:
-    transform .2s,
-    box-shadow .2s;
+display:inline-block;
+margin-top:25px;
+padding:13px 22px;
+border-radius:12px;
+background:#39d9ff;
+color:#001019;
+font-weight:800;
+text-decoration:none
 }
-
-.apply:hover{
-  transform:translateY(-2px);
-  box-shadow:
-    0 15px 35px
-    rgba(34,211,238,.2);
-}
-
-.note{
-  color:var(--muted);
-  font-size:12px;
-  margin-top:10px;
-  text-align:center;
-}
-
 .back{
-  display:inline-flex;
-  margin:4px 0 30px;
-  padding:9px 14px;
-  border:1px solid var(--line);
-  border-radius:12px;
-  color:var(--muted);
-  font-size:13px;
+display:inline-block;
+margin-top:22px;
+color:#8ddfff;
+text-decoration:none
 }
-
-.back:hover{
-  color:var(--text);
-  border-color:var(--brand);
-}
-
-.footer{
-  border-top:1px solid var(--line);
-  padding:28px 0 45px;
-  color:var(--muted);
-  font-size:12px;
-  text-align:center;
-}
-
-@media(max-width:600px){
-  .header{
-    align-items:flex-start;
-    flex-direction:column;
-  }
-
-  .nav{
-    gap:10px;
-  }
-
-  .card{
-    padding:20px;
-  }
+footer{
+margin-top:35px;
+padding-top:20px;
+border-top:1px solid #20283a;
+color:#758199;
+font-size:13px;
+text-align:center
 }
 </style>
 </head>
 
 <body>
-
 <div class="container">
 
-<header class="header">
-  <a class="logo" href="/">
-    💼 <span>GOO</span> JOBS
-  </a>
-
-  <nav class="nav">
-    <a href="/">Home</a>
-    <a href="/sitemap.xml">Sitemap</a>
-    <a href="/source-status.json">Status</a>
-  </nav>
+<header>
+<div class="logo">GOO JOBS</div>
+<nav>
+<a href="/">Home</a>
+<a href="/sitemap.xml">Sitemap</a>
+</nav>
 </header>
 
-<main>
-
-<section class="hero">
-
-<div class="source-row">
-
-<span class="badge">
-  ✓ Verified
-</span>
-
-<span class="badge">
-  ${esc(job.source)}
-</span>
-
-<span class="badge">
-  ${esc(
-    safeDate(
-      job.publishedAt
-    ).toISOString().substring(0,10)
-  )}
-</span>
-
-${remoteBadge}
-${hybridBadge}
-
+<div class="meta">
+<span class="badge">Verified Source</span>
+<span class="badge">${escapeHTML(job.source)}</span>
+${remote}
+${hybrid}
 </div>
 
-<h1>
-${esc(job.title)}
-at
-${esc(job.company)}
-</h1>
+<h1>${escapeHTML(job.title)}</h1>
 
 <div class="meta">
-
-<span class="meta-item">
-📍 ${esc(job.location)}
+<span class="pill">
+${escapeHTML(job.company)}
 </span>
 
-<span class="meta-item">
-🕒 ${esc(job.employmentType)}
+<span class="pill">
+${escapeHTML(job.location)}
 </span>
 
-<span class="meta-item">
-🎯 ${esc(job.experienceLevel)}
+<span class="pill">
+${escapeHTML(job.employmentType)}
 </span>
 
-<span class="meta-item">
-💰 ${esc(salary)}
+<span class="pill">
+${escapeHTML(job.experienceLevel)}
 </span>
-
 </div>
-
-</section>
 
 <section class="card">
 
-<h2>
-Job Description
-</h2>
+<h2>Job Description</h2>
 
 <div class="description">
-${descriptionHtml}
+${job.description
+  .split(/\n+/)
+  .map(
+    paragraph =>
+      `<p>${escapeHTML(
+        paragraph
+      )}</p>`
+  )
+  .join('')}
 </div>
 
 ${
   skills
     ? `
-<h2 style="margin-top:25px">
-Required Skills
-</h2>
-
+<h2>Skills</h2>
 <div class="skills">
 ${skills}
 </div>
@@ -3576,409 +2209,159 @@ ${skills}
 }
 
 <a
-  class="apply"
-  href="${esc(job.url)}"
-  target="_blank"
-  rel="nofollow noopener noreferrer"
->
-  Apply on Official Site ↗
+class="apply"
+href="${escapeHTML(job.url)}"
+target="_blank"
+rel="nofollow noopener">
+Apply on Official Source
 </a>
-
-<div class="note">
-You will be redirected to the company's official careers page.
-</div>
 
 </section>
 
-<a
-  class="back"
-  href="/"
->
+<a class="back"
+href="/">
 ← Back to all jobs
 </a>
 
-</main>
-
-<footer class="footer">
-© ${new Date().getFullYear()}
-GOO JOBS · Job information belongs to respective sources.
+<footer>
+GOO JOBS • Real job aggregation
+from public sources.
 </footer>
 
+${
+  ADSTERRA_SCRIPT
+    ? ADSTERRA_SCRIPT
+    : ''
+}
+
 </div>
-
-${ADSTERRA || ADSTERRA_TOKEN}
-
 </body>
 </html>`;
 }
 
-function normalizeEmploymentType(type) {
-  const value =
-    String(type || '')
-      .toLowerCase();
+// ============================================================
+// GENERATE JOB PAGES
+// ============================================================
 
-  if (
-    value.includes('part')
-  ) {
-    return 'PART_TIME';
-  }
+async function generateJobPages(jobs) {
+  /*
+   * Remove generated job folders first.
+   * This prevents expired jobs from remaining indexable.
+   */
 
-  if (
-    value.includes('intern')
-  ) {
-    return 'INTERN';
-  }
+  await fs.rm(
+    JOB_DIR,
+    {
+      recursive: true,
+      force: true
+    }
+  );
 
-  if (
-    value.includes('contract')
-  ) {
-    return 'CONTRACTOR';
-  }
+  await fs.mkdir(
+    JOB_DIR,
+    {
+      recursive: true
+    }
+  );
 
-  if (
-    value.includes('temporary')
-  ) {
-    return 'TEMPORARY';
-  }
+  await mapLimit(
+    jobs,
+    CONCURRENCY,
+    async job => {
+      const directory =
+        path.join(
+          JOB_DIR,
+          job.slug
+        );
 
-  return 'FULL_TIME';
-}
-
-/* ============================================================
-   32. GENERATE JOB PAGES
-============================================================ */
-
-async function generateJobPages(
-  jobs
-) {
-  if (!ENABLE_JOB_PAGES) {
-    return 0;
-  }
-
-  let generated = 0;
-
-  for (const job of jobs) {
-    const directory =
-      path.join(
-        JOBS_DIR,
-        job.slug
-      );
-
-    await fs.mkdir(
-      directory,
-      {
-        recursive: true
-      }
-    );
-
-    const html =
-      jobPageTemplate(job);
-
-    await atomicWrite(
-      path.join(
+      await fs.mkdir(
         directory,
-        'index.html'
-      ),
-      html
-    );
-
-    generated++;
-
-    if (
-      generated % 500 === 0
-    ) {
-      logger.info(
-        'Job pages generated',
         {
-          generated
+          recursive: true
         }
       );
+
+      await atomicWrite(
+        path.join(
+          directory,
+          'index.html'
+        ),
+        createJobPage(job)
+      );
+
+      return true;
     }
-  }
+  );
 
-  return generated;
-}
-
-/* ============================================================
-   33. JOB JSON
-============================================================ */
-
-async function generateJobsJson(
-  jobs,
-  sourceStatus
-) {
-  await atomicWrite(
-    DATA_FILE,
+  info(
+    'Job pages generated',
     {
-      schemaVersion:
-        '4.0',
-
-      generatedAt:
-        nowIso(),
-
-      buildId:
-        BUILD_ID,
-
-      count:
-        jobs.length,
-
-      jobs,
-
-      sources:
-        sourceStatus
-    },
-    true
+      count: jobs.length
+    }
   );
 }
 
-/* ============================================================
-   34. HOMEPAGE
-============================================================ */
+// ============================================================
+// SITEMAP
+// ============================================================
 
-async function generateHomepage() {
-  const source =
-    path.join(
-      ROOT,
-      'index.html'
-    );
+async function generateSitemap(jobs) {
+  const today =
+    new Date()
+      .toISOString()
+      .slice(0, 10);
 
-  if (
-    !fss.existsSync(source)
-  ) {
-    logger.warn(
-      'Root index.html not found'
-    );
+  let xml =
+`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url>
+<loc>${SITE_URL}/</loc>
+<lastmod>${today}</lastmod>
+<changefreq>daily</changefreq>
+<priority>1.0</priority>
+</url>
+`;
 
-    return;
+  for (const job of jobs) {
+    const date =
+      new Date(
+        job.updatedAt ||
+        job.publishedAt
+      )
+        .toISOString()
+        .slice(0, 10);
+
+    xml += `
+<url>
+<loc>${SITE_URL}/job/${escapeHTML(
+      job.slug
+    )}/</loc>
+<lastmod>${date}</lastmod>
+<changefreq>daily</changefreq>
+<priority>0.8</priority>
+</url>
+`;
   }
 
-  let html =
-    await fs.readFile(
-      source,
-      'utf8'
-    );
-
-  if (ADSTERRA) {
-    html =
-      html.split(
-        ADSTERRA_TOKEN
-      ).join(
-        ADSTERRA
-      );
-  }
+  xml += '\n</urlset>';
 
   await atomicWrite(
     path.join(
       PUBLIC,
-      'index.html'
+      'sitemap.xml'
     ),
-    html
+    xml
   );
 }
 
-/* ============================================================
-   35. SITEMAP
-============================================================ */
-
-function sitemapXml(
-  urls
-) {
-  let xml =
-    `<?xml version="1.0" encoding="UTF-8"?>\n`;
-
-  xml +=
-    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
-
-  for (const item of urls) {
-    xml +=
-      `  <url>\n`;
-
-    xml +=
-      `    <loc>${esc(item.loc)}</loc>\n`;
-
-    if (item.lastmod) {
-      xml +=
-        `    <lastmod>${esc(item.lastmod)}</lastmod>\n`;
-    }
-
-    if (item.changefreq) {
-      xml +=
-        `    <changefreq>${esc(item.changefreq)}</changefreq>\n`;
-    }
-
-    if (item.priority) {
-      xml +=
-        `    <priority>${esc(item.priority)}</priority>\n`;
-    }
-
-    xml +=
-      `  </url>\n`;
-  }
-
-  xml +=
-    `</urlset>`;
-
-  return xml;
-}
-
-function sitemapIndexXml(
-  files
-) {
-  let xml =
-    `<?xml version="1.0" encoding="UTF-8"?>\n`;
-
-  xml +=
-    `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
-
-  for (const file of files) {
-    xml +=
-      `  <sitemap>\n`;
-
-    xml +=
-      `    <loc>${esc(
-        `${SITE_URL}/${file}`
-      )}</loc>\n`;
-
-    xml +=
-      `  </sitemap>\n`;
-  }
-
-  xml +=
-    `</sitemapindex>`;
-
-  return xml;
-}
-
-async function generateSitemap(
-  jobs
-) {
-  const urls = [
-    {
-      loc:
-        `${SITE_URL}/`,
-
-      lastmod:
-        nowIso().substring(
-          0,
-          10
-        ),
-
-      changefreq:
-        'daily',
-
-      priority:
-        '1.0'
-    },
-
-    ...jobs.map(job => ({
-      loc:
-        `${SITE_URL}/job/${job.slug}/`,
-
-      lastmod:
-        safeDate(
-          job.updatedAt,
-          new Date()
-        )
-          .toISOString()
-          .substring(
-            0,
-            10
-          ),
-
-      changefreq:
-        'weekly',
-
-      priority:
-        '0.8'
-    }))
-  ];
-
-  const parts =
-    chunk(
-      urls,
-      SITEMAP_CHUNK_SIZE
-    );
-
-  const files = [];
-
-  for (
-    let i = 0;
-    i < parts.length;
-    i++
-  ) {
-    const filename =
-      `sitemap-${i + 1}.xml`;
-
-    await atomicWrite(
-      path.join(
-        PUBLIC,
-        filename
-      ),
-      sitemapXml(
-        parts[i]
-      )
-    );
-
-    files.push(filename);
-  }
-
-  if (
-    ENABLE_SITEMAP_INDEX &&
-    files.length > 1
-  ) {
-    await atomicWrite(
-      path.join(
-        PUBLIC,
-        'sitemap.xml'
-      ),
-      sitemapIndexXml(
-        files
-      )
-    );
-  } else if (
-    files.length === 1
-  ) {
-    await atomicWrite(
-      path.join(
-        PUBLIC,
-        'sitemap.xml'
-      ),
-      sitemapXml(
-        urls
-      )
-    );
-  }
-
-  logger.info(
-    'Sitemap generated',
-    {
-      urls:
-        urls.length,
-
-      files:
-        files.length
-    }
-  );
-
-  return files;
-}
-
-/* ============================================================
-   36. ROBOTS
-============================================================ */
+// ============================================================
+// ROBOTS
+// ============================================================
 
 async function generateRobots() {
-  if (!ENABLE_ROBOTS) {
-    return;
-  }
-
-  const content =
+  const robots =
 `User-agent: *
 Allow: /
-
-Disallow: /jobs.json
-Disallow: /source-status.json
-Disallow: /build-manifest.json
 
 Sitemap: ${SITE_URL}/sitemap.xml
 `;
@@ -3988,504 +2371,211 @@ Sitemap: ${SITE_URL}/sitemap.xml
       PUBLIC,
       'robots.txt'
     ),
-    content
+    robots
   );
 }
 
-/* ============================================================
-   37. SOURCE STATUS
-============================================================ */
+// ============================================================
+// SOURCE STATUS
+// ============================================================
 
-async function generateSourceStatus(
-  status
-) {
-  await atomicWrite(
-    STATUS_FILE,
-    {
-      schemaVersion:
-        '4.0',
-
-      generatedAt:
-        nowIso(),
-
-      buildId:
-        BUILD_ID,
-
-      sources:
-        status
-    },
-    true
-  );
-}
-
-/* ============================================================
-   38. BUILD MANIFEST
-============================================================ */
-
-async function generateManifest(
-  jobs,
-  sources
-) {
-  const categories = {};
-
-  const companies = {};
-
-  const locations = {};
-
-  for (const job of jobs) {
-    categories[job.category] =
-      (categories[job.category] || 0) +
-      1;
-
-    companies[job.company] =
-      (companies[job.company] || 0) +
-      1;
-
-    locations[job.location] =
-      (locations[job.location] || 0) +
-      1;
-  }
-
-  await atomicWrite(
-    MANIFEST_FILE,
-    {
-      schemaVersion:
-        '4.0',
-
-      buildId:
-        BUILD_ID,
-
-      generatedAt:
-        nowIso(),
-
-      site:
-        SITE_URL,
-
-      jobs:
-        jobs.length,
-
-      sources,
-
-      categories,
-
-      topCompanies:
-        Object.entries(
-          companies
-        )
-          .sort(
-            (a, b) =>
-              b[1] - a[1]
-          )
-          .slice(0, 50),
-
-      topLocations:
-        Object.entries(
-          locations
-        )
-          .sort(
-            (a, b) =>
-              b[1] - a[1]
-          )
-          .slice(0, 50)
-    },
-    true
-  );
-}
-
-/* ============================================================
-   39. VERIFICATION
-============================================================ */
-
-async function verifyBuild(
-  jobs
-) {
-  const requiredFiles = [
+async function generateSourceStatus() {
+  await writeJSON(
     path.join(
       PUBLIC,
-      'index.html'
+      'source-status.json'
     ),
+    {
+      generatedAt:
+        new Date().toISOString(),
+      target:
+        TARGET_JOBS,
+      finalJobs:
+        metrics.finalJobs,
+      sources:
+        metrics.sources,
+      errors:
+        metrics.errors
+    }
+  );
+}
 
+// ============================================================
+// JOBS JSON
+// ============================================================
+
+async function generateJobsJSON(jobs) {
+  await writeJSON(
     path.join(
       PUBLIC,
       'jobs.json'
     ),
-
-    path.join(
-      PUBLIC,
-      'sitemap.xml'
-    )
-  ];
-
-  for (
-    const file of requiredFiles
-  ) {
-    await fs.access(
-      file
-    );
-  }
-
-  const slugSet =
-    new Set();
-
-  for (const job of jobs) {
-    if (
-      !job.slug
-    ) {
-      throw new Error(
-        `Missing slug: ${job.id}`
-      );
-    }
-
-    if (
-      slugSet.has(
-        job.slug
-      )
-    ) {
-      throw new Error(
-        `Duplicate slug: ${job.slug}`
-      );
-    }
-
-    slugSet.add(
-      job.slug
-    );
-
-    if (
-      !/^https?:\/\//i.test(
-        job.url || ''
-      )
-    ) {
-      throw new Error(
-        `Invalid URL: ${job.url}`
-      );
-    }
-  }
-
-  const json =
-    JSON.parse(
-      await fs.readFile(
-        DATA_FILE,
-        'utf8'
-      )
-    );
-
-  if (
-    !Array.isArray(
-      json.jobs
-    )
-  ) {
-    throw new Error(
-      'jobs.json jobs array missing'
-    );
-  }
-
-  if (
-    json.jobs.length !==
-    jobs.length
-  ) {
-    throw new Error(
-      'jobs.json count mismatch'
-    );
-  }
-
-  logger.info(
-    'Build verification passed',
     {
-      jobs:
-        jobs.length
-    }
-  );
-}
-
-/* ============================================================
-   40. SOURCE RUNNER
-============================================================ */
-
-const SOURCES = [
-  [
-    'Arbeitnow',
-    fetchArbeitnow
-  ],
-
-  [
-    'Lever',
-    fetchLever
-  ],
-
-  [
-    'Greenhouse',
-    fetchGreenhouse
-  ],
-
-  [
-    'RSS',
-    fetchRSS
-  ],
-
-  [
-    'Remotive',
-    fetchRemotive
-  ],
-
-  [
-    'NCS',
-    fetchNCS
-  ],
-
-  [
-    'IndianAPI',
-    fetchIndianAPI
-  ],
-
-  [
-    'JobDataAPI',
-    fetchJobDataAPI
-  ]
-];
-
-async function runSource(
-  name,
-  fn
-) {
-  const started =
-    Date.now();
-
-  try {
-    const jobs =
-      await fn();
-
-    const duration =
-      Date.now() -
-      started;
-
-    metrics.sources[name] = {
-      ok: true,
+      generatedAt:
+        new Date().toISOString(),
 
       count:
         jobs.length,
 
-      durationMs:
-        duration,
+      target:
+        TARGET_JOBS,
 
-      error:
-        null
-    };
+      liveOnly:
+        true,
 
-    logger.info(
-      `Source completed: ${name}`,
-      {
-        count:
-          jobs.length,
+      dummyJobs:
+        false,
 
-        durationMs:
-          duration
-      }
+      jobs,
+
+      sources:
+        metrics.sources
+    }
+  );
+}
+
+// ============================================================
+// HOMEPAGE
+// ============================================================
+
+async function generateHomepage() {
+  const source =
+    path.join(
+      ROOT,
+      'index.html'
     );
 
-    return {
-      name,
-      ok: true,
-      count: jobs.length,
-      items: jobs,
-      durationMs: duration,
-      error: null
-    };
+  try {
+    const html =
+      await fs.readFile(
+        source,
+        'utf8'
+      );
 
-  } catch (error) {
-    const duration =
-      Date.now() -
-      started;
-
-    metrics.sources[name] = {
-      ok: false,
-
-      count:
-        0,
-
-      durationMs:
-        duration,
-
-      error:
-        error.message
-    };
-
-    logger.error(
-      `Source failed: ${name}`,
-      {
-        error:
-          error.message
-      }
+    await atomicWrite(
+      path.join(
+        PUBLIC,
+        'index.html'
+      ),
+      html
     );
+  } catch {
+    /*
+     * Do not fabricate homepage content.
+     * If index.html does not exist, build fails clearly.
+     */
 
-    return {
-      name,
-      ok: false,
-      count: 0,
-      items: [],
-      durationMs: duration,
-      error:
-        error.message
-    };
+    throw new Error(
+      'index.html was not found in project root'
+    );
   }
 }
 
-/* ============================================================
-   41. SOURCE CONCURRENCY
-============================================================ */
-
-async function runSources() {
-  const results =
-    new Array(
-      SOURCES.length
-    );
-
-  let cursor = 0;
-
-  const workers =
-    Array.from(
-      {
-        length:
-          Math.min(
-            SOURCE_CONCURRENCY,
-            SOURCES.length
-          )
-      },
-      async () => {
-        while (true) {
-          const index =
-            cursor++;
-
-          if (
-            index >=
-            SOURCES.length
-          ) {
-            return;
-          }
-
-          const [
-            name,
-            fn
-          ] =
-            SOURCES[index];
-
-          results[index] =
-            await runSource(
-              name,
-              fn
-            );
-        }
-      }
-    );
-
-  await Promise.all(
-    workers
-  );
-
-  return results;
-}
-
-/* ============================================================
-   42. MAIN BUILD
-============================================================ */
+// ============================================================
+// MAIN PIPELINE
+// ============================================================
 
 async function main() {
-  logger.info(
-    '========================================'
-  );
+  const started =
+    Date.now();
 
-  logger.info(
-    'GOO JOBS v4 BUILD START'
-  );
-
-  logger.info(
-    '========================================',
+  info(
+    'GOO JOBS FINAL AUTO-SYNC STARTED',
     {
-      buildId:
-        BUILD_ID,
-
       target:
-        TARGET,
-
-      retentionDays:
-        RETENTION_DAYS,
-
-      concurrency:
-        CONCURRENCY,
-
-      rpm:
-        RPM
+        TARGET_JOBS
     }
   );
 
-  await fs.mkdir(
-    PUBLIC,
-    {
-      recursive: true
-    }
-  );
-
-  await fs.mkdir(
-    JOBS_DIR,
-    {
-      recursive: true
-    }
-  );
-
-  await fs.mkdir(
-    CACHE_DIR,
-    {
-      recursive: true
-    }
-  );
-
-  await fs.mkdir(
-    LOG_DIR,
-    {
-      recursive: true
-    }
-  );
+  await ensureDirectories();
 
   const previous =
-    await loadPrevious();
+    await loadPreviousJobs();
 
-  logger.info(
-    'Previous jobs loaded',
+  info(
+    'Previous dataset loaded',
     {
       count:
         previous.length
     }
   );
 
+  const sources = [
+    [
+      'Arbeitnow',
+      fetchArbeitnow
+    ],
+    [
+      'Lever',
+      fetchLever
+    ],
+    [
+      'Greenhouse',
+      fetchGreenhouse
+    ],
+    [
+      'RSS',
+      fetchRSS
+    ],
+    [
+      'Remotive',
+      fetchRemotive
+    ],
+    [
+      'NCS',
+      fetchNCS
+    ],
+    [
+      'IndianAPI',
+      fetchIndianAPI
+    ],
+    [
+      'JobDataAPI',
+      fetchJobDataAPI
+    ]
+  ];
+
   const sourceResults =
-    await runSources();
+    await Promise.allSettled(
+      sources.map(
+        async ([name, fetcher]) => {
+          try {
+            const jobs =
+              await fetcher();
+
+            return {
+              name,
+              jobs
+            };
+          } catch (err) {
+            error(
+              `${name} source crashed`,
+              {
+                error:
+                  err.message
+              }
+            );
+
+            return {
+              name,
+              jobs: []
+            };
+          }
+        }
+      )
+    );
 
   let rawJobs = [];
 
-  const sourceStatus = {};
-
   for (
-    const result of
-    sourceResults
+    const result of sourceResults
   ) {
-    sourceStatus[result.name] = {
-      ok:
-        result.ok,
-
-      count:
-        result.count,
-
-      durationMs:
-        result.durationMs,
-
-      error:
-        result.error
-    };
-
     if (
-      result.items?.length
+      result.status ===
+      'fulfilled'
     ) {
       rawJobs.push(
-        ...result.items
+        ...result.value.jobs
       );
     }
   }
@@ -4493,392 +2583,322 @@ async function main() {
   metrics.rawJobs =
     rawJobs.length;
 
-  logger.info(
-    'Raw jobs collected',
+  info(
+    'Raw source collection complete',
     {
-      count:
+      jobs:
         rawJobs.length
     }
   );
 
-  let normalized =
+  // ----------------------------------------------------------
+  // NORMALIZE
+  // ----------------------------------------------------------
+
+  const normalized =
     rawJobs
-      .map(
-        normalizeJob
-      )
-      .filter(
-        isValid
-      );
+      .map(normalizeJob)
+      .filter(Boolean);
 
   metrics.validJobs =
     normalized.length;
 
-  logger.info(
-    'Validation complete',
+  info(
+    'Normalization complete',
     {
-      valid:
+      jobs:
         normalized.length
     }
   );
 
-  normalized =
-    dedupe(
+  // ----------------------------------------------------------
+  // DEDUP
+  // ----------------------------------------------------------
+
+  let jobs =
+    deduplicate(
       normalized
     );
 
-  logger.info(
+  info(
     'Deduplication complete',
     {
-      unique:
-        normalized.length,
-
+      jobs:
+        jobs.length,
       duplicates:
         metrics.duplicateJobs
     }
   );
 
-  let merged =
-    mergePrevious(
-      normalized,
-      previous
+  // ----------------------------------------------------------
+  // ONLY CURRENT REAL JOBS
+  // ----------------------------------------------------------
+
+  const beforeExpiry =
+    jobs.length;
+
+  jobs =
+    jobs.filter(
+      validateJob
     );
 
-  logger.info(
-    'Previous data merged',
+  metrics.expiredJobs =
+    beforeExpiry -
+    jobs.length;
+
+  info(
+    'Live/fresh filtering complete',
     {
-      total:
-        merged.length
+      jobs:
+        jobs.length,
+      expired:
+        metrics.expiredJobs
     }
   );
-
-  merged =
-    removeExpired(
-      merged
-    );
-
-  logger.info(
-    'Expired jobs removed',
-    {
-      remaining:
-        merged.length
-    }
-  );
-
-  merged =
-    scoreSort(
-      merged
-    );
-
-  let active =
-    merged.slice(
-      0,
-      TARGET
-    );
 
   /*
    * IMPORTANT:
-   * If every live source fails but previous data exists,
-   * preserve previous jobs instead of publishing an empty site.
+   * Previous jobs are NOT blindly reactivated.
+   *
+   * A previous job survives only if it was fetched again
+   * from a real source during the current sync.
+   *
+   * This prevents stale listings from pretending to be live.
    */
 
-  const successfulSources =
-    sourceResults.filter(
-      r => r.ok && r.count > 0
+  const currentMap =
+    new Map(
+      jobs.map(
+        job => [
+          normalizedURL(
+            job.url
+          ),
+          job
+        ]
+      )
     );
 
-  if (
-    active.length === 0 &&
-    previous.length > 0 &&
-    KEEP_PREVIOUS_ON_FAILURE
-  ) {
-    logger.warn(
-      'No usable fresh jobs. Preserving previous dataset.'
-    );
+  const refreshed = [];
 
-    active =
-      scoreSort(
-        removeExpired(
-          previous
-        )
-      ).slice(
-        0,
-        TARGET
+  for (const oldJob of previous) {
+    const key =
+      normalizedURL(
+        oldJob.url
       );
+
+    const current =
+      currentMap.get(key);
+
+    if (!current) {
+      continue;
+    }
+
+    current.firstSeenAt =
+      oldJob.firstSeenAt ||
+      current.firstSeenAt;
+
+    current.lastSeenAt =
+      new Date().toISOString();
+
+    refreshed.push(
+      current
+    );
   }
+
+  /*
+   * Add newly discovered jobs.
+   */
+
+  const finalMap =
+    new Map();
+
+  for (const job of [
+    ...refreshed,
+    ...jobs
+  ]) {
+    finalMap.set(
+      normalizedURL(
+        job.url
+      ),
+      job
+    );
+  }
+
+  jobs =
+    [...finalMap.values()];
+
+  // ----------------------------------------------------------
+  // RANK
+  // ----------------------------------------------------------
+
+  jobs =
+    rankJobs(jobs);
+
+  // ----------------------------------------------------------
+  // LIMIT
+  // ----------------------------------------------------------
+
+  jobs =
+    jobs.slice(
+      0,
+      TARGET_JOBS
+    );
 
   metrics.finalJobs =
-    active.length;
+    jobs.length;
 
-  if (
-    active.length === 0
-  ) {
+  info(
+    'Final live dataset ready',
+    {
+      jobs:
+        jobs.length,
+      requested:
+        TARGET_JOBS
+    }
+  );
+
+  /*
+   * NEVER create dummy jobs.
+   */
+
+  if (!jobs.length) {
     throw new Error(
-      'Build produced zero jobs.'
+      'ZERO REAL JOBS FOUND. Build stopped. No dummy jobs generated.'
     );
   }
 
-  await generateJobPages(
-    active
-  )
-    .then(
-      count => {
-        metrics.pagesGenerated =
-          count;
-      }
-    );
-
-  await generateJobsJson(
-    active,
-    sourceStatus
-  );
+  // ----------------------------------------------------------
+  // GENERATE
+  // ----------------------------------------------------------
 
   await generateHomepage();
 
+  await generateJobPages(
+    jobs
+  );
+
+  await generateJobsJSON(
+    jobs
+  );
+
   await generateSitemap(
-    active
+    jobs
   );
 
   await generateRobots();
 
-  await generateSourceStatus(
-    sourceStatus
-  );
+  await generateSourceStatus();
 
-  await generateManifest(
-    active,
-    sourceStatus
-  );
-
-  await verifyBuild(
-    active
-  );
+  // ----------------------------------------------------------
+  // FINAL METRICS
+  // ----------------------------------------------------------
 
   metrics.finishedAt =
-    nowIso();
+    new Date().toISOString();
 
   metrics.durationMs =
     Date.now() -
-    new Date(
-      BUILD_STARTED_AT
-    ).getTime();
+    started;
 
-  await logger.save();
-
-  logger.info(
-    '========================================'
+  await writeJSON(
+    path.join(
+      LOG_DIR,
+      'metrics.json'
+    ),
+    metrics
   );
 
-  logger.info(
-    'GOO JOBS v4 BUILD COMPLETE',
+  info(
+    'GOO JOBS AUTO-SYNC COMPLETE',
     {
-      buildId:
-        BUILD_ID,
-
-      jobs:
-        active.length,
-
-      pages:
-        metrics.pagesGenerated,
-
+      finalJobs:
+        jobs.length,
+      target:
+        TARGET_JOBS,
       durationMs:
-        metrics.durationMs,
-
-      successfulSources:
-        successfulSources.length,
-
-      totalSources:
-        SOURCES.length
+        metrics.durationMs
     }
   );
 
-  logger.info(
-    '========================================'
-  );
+  /*
+   * Non-zero exit code only when there are no jobs.
+   * Fewer than TARGET_JOBS is NOT an error because
+   * the engine must never manufacture fake listings.
+   */
 }
 
-/* ============================================================
-   43. HEALTH SERVER
-============================================================ */
+main().catch(
+  async err => {
+    error(
+      'BUILD FAILED',
+      {
+        error:
+          err?.stack ||
+          err?.message ||
+          String(err)
+      }
+    );
 
-let healthServer = null;
+    metrics.finishedAt =
+      new Date().toISOString();
 
-function startHealthServer() {
-  if (!ENABLE_HEALTH) {
-    return;
+    metrics.durationMs =
+      Date.now() -
+      new Date(
+        metrics.startedAt
+      ).getTime();
+
+    await writeJSON(
+      path.join(
+        LOG_DIR,
+        'metrics.json'
+      ),
+      metrics
+    ).catch(() => {});
+
+    process.exit(1);
   }
+);
 
-  healthServer =
-    http.createServer(
-      (_, response) => {
-        response.writeHead(
+// ============================================================
+// OPTIONAL HEALTH SERVER
+// ============================================================
+
+if (HEALTH_PORT > 0) {
+  http
+    .createServer(
+      async (_req, res) => {
+        res.writeHead(
           200,
           {
             'Content-Type':
-              'application/json; charset=utf-8',
-
-            'Cache-Control':
-              'no-store'
+              'application/json'
           }
         );
 
-        response.end(
-          JSON.stringify(
-            {
-              ok: true,
-
-              service:
-                'goo-jobs-generator',
-
-              version:
-                '4.0',
-
-              buildId:
-                BUILD_ID,
-
-              time:
-                nowIso()
-            }
-          )
+        res.end(
+          JSON.stringify({
+            ok: true,
+            site:
+              SITE_URL,
+            target:
+              TARGET_JOBS,
+            time:
+              new Date().toISOString()
+          })
+        );
+      }
+    )
+    .listen(
+      HEALTH_PORT,
+      () => {
+        info(
+          'Health server started',
+          {
+            port:
+              HEALTH_PORT
+          }
         );
       }
     );
-
-  healthServer.listen(
-    HEALTH_PORT,
-    () => {
-      logger.info(
-        'Health server started',
-        {
-          port:
-            HEALTH_PORT
-        }
-      );
-    }
-  );
 }
-
-/* ============================================================
-   44. SHUTDOWN
-============================================================ */
-
-let shuttingDown =
-  false;
-
-async function shutdown(
-  code
-) {
-  if (shuttingDown) {
-    return;
-  }
-
-  shuttingDown = true;
-
-  try {
-    if (healthServer) {
-      healthServer.close();
-    }
-  } catch (_) {}
-
-  try {
-    await logger.save();
-  } catch (_) {}
-
-  process.exit(
-    code
-  );
-}
-
-process.on(
-  'SIGINT',
-  () => {
-    logger.warn(
-      'SIGINT received'
-    );
-
-    shutdown(130);
-  }
-);
-
-process.on(
-  'SIGTERM',
-  () => {
-    logger.warn(
-      'SIGTERM received'
-    );
-
-    shutdown(143);
-  }
-);
-
-process.on(
-  'uncaughtException',
-  async error => {
-    logger.error(
-      'Uncaught exception',
-      {
-        error:
-          error.message,
-
-        stack:
-          error.stack
-      }
-    );
-
-    await logger.save();
-
-    process.exit(1);
-  }
-);
-
-process.on(
-  'unhandledRejection',
-  async error => {
-    logger.error(
-      'Unhandled rejection',
-      {
-        error:
-          error?.message ||
-          String(error)
-      }
-    );
-
-    await logger.save();
-
-    process.exit(1);
-  }
-);
-
-/* ============================================================
-   45. START
-============================================================ */
-
-startHealthServer();
-
-main()
-  .catch(
-    async error => {
-      logger.error(
-        'BUILD FAILED',
-        {
-          error:
-            error.message,
-
-          stack:
-            error.stack
-        }
-      );
-
-      metrics.finishedAt =
-        nowIso();
-
-      metrics.durationMs =
-        Date.now() -
-        new Date(
-          BUILD_STARTED_AT
-        ).getTime();
-
-      await logger.save();
-
-      process.exit(1);
-    }
-  );
