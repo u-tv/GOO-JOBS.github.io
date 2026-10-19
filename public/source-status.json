@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-18T02:58:18.744Z",
+  "generatedAt": "2026-10-19T03:12:02.505Z",
   "target": 5000,
   "actualJobs": 5000,
   "targetReached": true,
@@ -7,56 +7,56 @@
   "sources": {
     "Arbeitnow": {
       "ok": true,
-      "fetched": 3353,
-      "durationMs": 17201,
+      "fetched": 4200,
+      "durationMs": 7804,
       "error": null
     },
     "RemoteOK": {
       "ok": true,
       "fetched": 99,
-      "durationMs": 637,
+      "durationMs": 611,
       "error": null
     },
     "Lever": {
       "ok": true,
-      "fetched": 248,
-      "durationMs": 113070,
+      "fetched": 249,
+      "durationMs": 118875,
       "error": null
     },
     "Greenhouse": {
       "ok": true,
-      "fetched": 6517,
-      "durationMs": 66971,
+      "fetched": 6511,
+      "durationMs": 65739,
       "error": null
     },
     "Recruitee": {
       "ok": true,
       "fetched": 1,
-      "durationMs": 70344,
+      "durationMs": 69748,
       "error": null
     },
     "Breezy": {
       "ok": true,
       "fetched": 1,
-      "durationMs": 91782,
+      "durationMs": 89870,
       "error": null
     },
     "RSS": {
       "ok": true,
       "fetched": 300,
-      "durationMs": 45291,
+      "durationMs": 53150,
       "error": null
     },
     "Remotive": {
       "ok": true,
-      "fetched": 13,
-      "durationMs": 697,
+      "fetched": 12,
+      "durationMs": 771,
       "error": null
     },
     "NCS": {
       "ok": true,
       "fetched": 0,
-      "durationMs": 4613,
+      "durationMs": 4058,
       "error": null
     },
     "IndianAPI": {
